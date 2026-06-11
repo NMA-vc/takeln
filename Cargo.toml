@@ -1,0 +1,70 @@
+[package]
+name = "takeln"
+version = "0.9.1"
+edition = "2021"
+rust-version = "1.75.0"
+authors = ["NMA (New Model Agents) <hello@nma.vc>"]
+license = "Apache-2.0"
+description = "Typed Rust runtime for durable DAG-based agent workflows"
+repository = "https://github.com/NMA-vc/takeln"
+homepage = "https://github.com/NMA-vc/takeln"
+documentation = "https://docs.rs/takeln"
+readme = "README.md"
+keywords = ["agents", "dag", "agentic", "ai", "orchestration"]
+categories = ["asynchronous", "concurrency"]
+exclude = ["benches/", "tests/", ".github/", ".cargo/", "deny.toml", "clippy.toml", "rustfmt.toml"]
+
+[features]
+default = []
+postgres = ["dep:sqlx-core", "dep:sqlx-postgres"]
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+rand = "0.8"
+tokio-util = "0.7"
+uuid = { version = "1.0", features = ["v4", "v5", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+tracing = "0.1"
+
+
+[dependencies.sqlx-core]
+version = "0.8"
+optional = true
+default-features = false
+features = ["json", "chrono"]
+
+[dependencies.sqlx-postgres]
+version = "0.8"
+optional = true
+default-features = false
+features = ["json", "chrono", "uuid"]
+
+[dependencies.rusqlite]
+version = "0.32"
+optional = true
+features = ["bundled"]
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+proptest = "1"
+
+[[bench]]
+name = "sequential_throughput"
+harness = false
+
+[[bench]]
+name = "checkpoint_overhead"
+harness = false
+
+[[bench]]
+name = "large_state"
+harness = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
