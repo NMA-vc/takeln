@@ -28,13 +28,13 @@ Agentic workflows require structured execution environments where state can be:
 Add `takeln` to your `Cargo.toml`:
 ```toml
 [dependencies]
-takeln = "0.9.1"
+takeln = "0.11.0"
 ```
 
 With optional features:
 ```toml
 [dependencies]
-takeln = { version = "0.9.1", features = ["sqlite"] }
+takeln = { version = "0.11.0", features = ["sqlite"] }
 ```
 
 ---
@@ -140,7 +140,16 @@ let records = graph.execution_history().await;
 ```
 
 ### 9. Typed Errors
-`takeln` enforces typed error handling. Node executions return a `GraphError` representing workflow signals (e.g. `Yield`, `Retryable`, `Fatal`), while the runner returns a `TakelnError` (e.g., `NodeNotFound`, `BudgetExceeded`, `CheckpointError`, `PartialWaveFailure`), making it easy to programmatically decide whether to retry or escalate.
+`takeln` enforces typed error handling. Node executions return a `GraphError` representing workflow signals (e.g. `Yield`, `Retryable`, `Fatal`), while the runner returns a `TakelnError` (e.g., `NodeNotFound`, `BudgetExceeded`, `CheckpointError`, `PartialWaveFailure`, `StepLimitExceeded`), making it easy to programmatically decide whether to retry or escalate.
+
+### 10. Sequential Loops
+Conditional edges can create cycles in `Graph::run()`, enabling retry loops and iterative refinement patterns. The `max_sequential_steps` resource limit (default: 1,000) prevents infinite loops.
+
+### 11. Structured Human-in-the-Loop
+Beyond simple interrupt-before/after, nodes can yield with a `YieldRequest` containing a message, JSON schema, and `ResumeMode`. Resume with `graph.resume_with_input()` which validates input against the schema before continuing.
+
+### 12. Dynamic Nodes
+`DynamicNode<S>` and `ChildRunner<S>` enable imperative child node orchestration — dynamically invoke registered nodes at runtime rather than declaring static edges. Dynamic execution is atomic for checkpointing.
 
 ---
 
@@ -185,7 +194,7 @@ pub trait Checkpointer<S: State>: Send + Sync {
 
 - **[GUIDE.md](GUIDE.md)** — Comprehensive getting started guide
 - **[API Docs](https://docs.rs/takeln)** — Full type reference
-- **[examples/](examples/)** — 8 working examples covering sequential chains, parallel DAGs, conditional routing, human-in-the-loop, crash recovery, LLM metadata, and builder APIs
+- **[examples/](examples/)** — 11 working examples covering sequential chains, parallel DAGs, conditional routing, human-in-the-loop, crash recovery, LLM metadata, builder APIs, loops, structured HITL, and dynamic nodes
 
 ---
 

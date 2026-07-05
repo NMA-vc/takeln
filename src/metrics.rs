@@ -1,4 +1,5 @@
 use crate::emitter::SpanStatus;
+use crate::hitl::ResumeRecord;
 use std::sync::Arc;
 
 /// Hook for collecting metrics from graph execution.
@@ -12,6 +13,8 @@ pub trait MetricsHook: Send + Sync {
     fn on_graph_complete(&self, thread_id: &str, total_cost: f64, total_duration_ms: u64);
     /// Called after a checkpoint is successfully saved.
     fn on_checkpoint_saved(&self, thread_id: &str, checkpoint_id: &str);
+    /// Called when a thread is successfully resumed.
+    fn on_resume(&self, _record: &ResumeRecord) {}
 }
 
 /// Default no-op metrics hook that discards all metrics.
@@ -21,6 +24,7 @@ impl MetricsHook for NoopMetricsHook {
     fn on_node_complete(&self, _: &str, _: u64, _: SpanStatus) {}
     fn on_graph_complete(&self, _: &str, _: f64, _: u64) {}
     fn on_checkpoint_saved(&self, _: &str, _: &str) {}
+    fn on_resume(&self, _: &ResumeRecord) {}
 }
 
 /// Returns the default no-op metrics hook.

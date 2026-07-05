@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-05
+
+### Added
+- `claimed_interrupt` field to `CheckpointMeta` for separate lock-claiming semantics
+- `ClaimResult` enum variants `Claimed`, `InProgress`, and `AlreadyCompleted` for safe CAS execution
+- `payload_ref` field to `YieldRequest` for payload-by-reference handle storage to avoid inline PII
+- Failure reversion: `resume_with_input` rolls back checkpoints to `Yielded` with active claims cleared on node execution errors
+- New integration tests suite for concurrent resumes and crash-recovery simulation (`tests/hitl_concurrency_tests.rs`)
+
+### Changed
+- **Breaking**: `Checkpointer::save_state` signature updated to accept `claimed_interrupt` and `resolved_interrupt`
+- `claim_interrupt` now returns `Result<ClaimResult, TakelnError>` and manages atomic updates of `claimed_interrupt`
+- Successful resumption writes `resolved_interrupt` to database to prevent stale resumes and duplicates
+
+## [0.10.0] - 2026-07-04
+
+### Added
+- Sequential loop support: conditional edges can create cycles in `Graph::run()`
+- `max_sequential_steps` resource limit (default: 1,000) with `StepLimitExceeded` error
+- Structured HITL: `YieldRequest` and `ResumeMode` types in new `hitl` module
+- `Graph::resume_with_input()` for resuming with validated human input
+- `NodeContext::resumed_input` field for HITL re-entry mode
+- Schema validation (type + enum) for HITL resume input
+- `DynamicNode<S>` trait for imperative child node orchestration
+- `ChildRunner<S>` handle for invoking registered nodes from dynamic nodes
+- `Graph::add_dynamic_fn_node()` and `GraphBuilder::dynamic_fn_node()` registration
+- New examples: `loop_until_valid`, `hitl_approval`, `dynamic_orchestration`
+
+### Changed
+- **Breaking**: `GraphError::Yield(String)` → `GraphError::Yield(YieldRequest)`. Use `YieldRequest::simple("msg")` for migration.
+- `CheckpointMeta` now includes optional `yield_request` field
+- `NodeContext::new()` accepts additional `resumed_input` parameter (internal)
+- `Graph::run()` now delegates to internal `run_inner()` method
+
+### Migration from v0.9.x
+
+```rust
+// Before
+Err(GraphError::Yield("message".into()))
+// After
+Err(GraphError::Yield(YieldRequest::simple("message")))
+```
+
 ## [0.9.1] - 2026-06-05
 
 ### Security

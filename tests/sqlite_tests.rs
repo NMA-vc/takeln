@@ -21,6 +21,9 @@ async fn test_sqlite_save_and_load() {
             "NodeB".to_string(),
             None,
             CheckpointStatus::Complete,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -55,6 +58,9 @@ async fn test_sqlite_load_version() {
             "A".to_string(),
             None,
             CheckpointStatus::Complete,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -65,6 +71,9 @@ async fn test_sqlite_load_version() {
             "B".to_string(),
             None,
             CheckpointStatus::Complete,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -91,6 +100,9 @@ async fn test_sqlite_list_checkpoints() {
             "A".to_string(),
             None,
             CheckpointStatus::Complete,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -113,6 +125,9 @@ async fn test_sqlite_retention_keep_last() {
             "A".to_string(),
             None,
             CheckpointStatus::Complete,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -143,6 +158,9 @@ async fn test_sqlite_with_dag() {
         "step_a".to_string(),
         Some(&dag),
         CheckpointStatus::Running,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -174,6 +192,9 @@ async fn test_sqlite_status_roundtrip() {
             format!("Node{}", i),
             None,
             status.clone(),
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();

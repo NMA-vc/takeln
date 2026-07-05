@@ -22,6 +22,9 @@ fn bench_checkpoint_save_load(c: &mut Criterion) {
                     "next".to_string(),
                     None,
                     CheckpointStatus::Complete,
+                    None,
+                    None,
+                    None,
                 )
                 .await
                 .unwrap()
@@ -40,6 +43,9 @@ fn bench_checkpoint_save_load(c: &mut Criterion) {
                     "next".to_string(),
                     None,
                     CheckpointStatus::Complete,
+                    None,
+                    None,
+                    None,
                 )
                 .await
                 .unwrap();

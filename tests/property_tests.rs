@@ -40,7 +40,7 @@ proptest! {
             let state = PropState { value: value.clone(), counter };
             let id = cp.save_state(
                 "prop_thread".to_string(), state.clone(), "next".to_string(),
-                None, CheckpointStatus::Complete,
+                None, CheckpointStatus::Complete, None, None, None,
             ).await.unwrap();
 
             let (loaded, meta, _) = cp.load_state("prop_thread".to_string()).await.unwrap().unwrap();

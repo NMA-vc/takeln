@@ -12,13 +12,15 @@ This guide walks you through building your first workflow with `takeln`, from a 
 2. [Your First Graph](#your-first-graph)
 3. [Nodes](#nodes)
 4. [Edges](#edges)
-5. [Checkpointing](#checkpointing)
-6. [Parallel DAG Execution](#parallel-dag-execution)
-7. [Error Handling & Retries](#error-handling--retries)
-8. [Per-Node Policies](#per-node-policies)
-9. [Human-in-the-Loop](#human-in-the-loop)
-10. [Observability](#observability)
-11. [Builder APIs](#builder-apis)
+5. [Sequential Loops](#sequential-loops)
+6. [Checkpointing](#checkpointing)
+7. [Parallel DAG Execution](#parallel-dag-execution)
+8. [Error Handling & Retries](#error-handling--retries)
+9. [Per-Node Policies](#per-node-policies)
+10. [Human-in-the-Loop](#human-in-the-loop)
+11. [Dynamic Nodes](#dynamic-nodes)
+12. [Observability](#observability)
+13. [Builder APIs](#builder-apis)
 
 ---
 
@@ -28,7 +30,7 @@ Add `takeln` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-takeln = "0.9.1"
+takeln = "0.11.0"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
@@ -170,6 +172,39 @@ Ok(NodeOutput::bare(state).with_event("needs_review"))
 
 ---
 
+## Sequential Loops
+
+Conditional edges can point back to earlier nodes, creating loops in sequential execution:
+
+```rust
+let mut graph = Graph::new();
+graph.add_node("validate", ValidateNode);
+graph.add_node("fix", FixNode);
+
+graph.add_conditional_edge("validate", |state: &MyState| {
+    if state.is_valid {
+        "__END__".to_string()
+    } else {
+        "fix".to_string() // loop back
+    }
+});
+graph.add_edge("fix", "validate");
+```
+
+The `max_sequential_steps` resource limit (default: 1,000) prevents infinite loops:
+
+```rust
+use takeln::ResourceLimits;
+
+graph.set_resource_limits(ResourceLimits::default().with_max_sequential_steps(100));
+```
+
+Exceeding the limit returns `TakelnError::StepLimitExceeded`.
+
+> See `examples/loop_until_valid.rs` for a complete working example.
+
+---
+
 ## Checkpointing
 
 Every state transition is automatically checkpointed. This enables:
@@ -241,8 +276,8 @@ Err(GraphError::Retryable("API timeout".into()))
 // Fatal: execution stops immediately
 Err(GraphError::Fatal("Invalid configuration".into()))
 
-// Yield: suspend execution for human approval
-Err(GraphError::Yield("Awaiting approval".into()))
+// Yield: suspend execution for human input (see Human-in-the-Loop section)
+Err(GraphError::Yield(YieldRequest::simple("Awaiting approval")))
 ```
 
 ### Retry Policy
@@ -294,6 +329,8 @@ graph.add_node_with_config("expensive_llm", MyLLMNode, NodeConfig {
 
 ## Human-in-the-Loop
 
+### Interrupt Before/After
+
 Interrupt execution before or after specific nodes:
 
 ```rust
@@ -308,6 +345,101 @@ let state = graph.run("thread_1", state, "start", &cp, None).await?;
 // Resume from where we left off
 let final_state = graph.resume("thread_1", &cp, None).await?.unwrap();
 ```
+
+### Structured Yields
+
+For richer human-in-the-loop workflows, nodes can yield with a structured `YieldRequest` that includes a schema for validation:
+
+```rust
+use takeln::hitl::{YieldRequest, ResumeMode};
+use serde_json::json;
+
+// Yield with a structured request
+Err(GraphError::Yield(YieldRequest {
+    interrupt_id: "approve_budget".to_string(),
+    message: "Please approve the budget allocation.".to_string(),
+    schema: Some(json!({
+        "type": "string",
+        "enum": ["approved", "rejected"]
+    })),
+    resume_mode: ResumeMode::ReEntry,
+}))
+```
+
+Resume with validated input:
+
+```rust
+let result = graph.resume_with_input(
+    "thread_1",
+    &cp,
+    json!("approved"),
+    None,
+).await?;
+```
+
+The input is validated against the schema before execution resumes. The node receives the input via `ctx.resumed_input`:
+
+```rust
+async fn call(&self, ctx: NodeContext, mut state: MyState) -> Result<NodeOutput<MyState>, GraphError> {
+    if let Some(input) = &ctx.resumed_input {
+        // Handle the human's response
+        let decision = input.as_str().unwrap();
+        state.approved = decision == "approved";
+        return Ok(NodeOutput::bare(state));
+    }
+
+    // First execution: yield for human input
+    Err(GraphError::Yield(YieldRequest::simple("Please approve.")))
+}
+```
+
+**`ResumeMode`** controls how the graph resumes:
+- `ReEntry` — re-executes the yielding node with `ctx.resumed_input` set
+- `Handoff` — skips the yielding node and continues to the next edge
+
+> See `examples/hitl_approval.rs` for a complete working example.
+
+---
+
+## Dynamic Nodes
+
+Dynamic nodes can invoke child nodes imperatively at runtime, rather than relying on static edge declarations:
+
+```rust
+use takeln::{Graph, NodeContext, NodeOutput, GraphError};
+
+graph.add_dynamic_fn_node("orchestrator", |ctx, state, runner| async move {
+    // Invoke child nodes imperatively
+    let state = runner.call("validate", ctx.clone(), state).await?;
+    let state = runner.call("transform", ctx.clone(), state).await?;
+
+    // Conditional child invocation
+    if state.needs_review {
+        let state = runner.call("review", ctx.clone(), state).await?;
+    }
+
+    Ok(NodeOutput::bare(state))
+});
+```
+
+Or with the builder API:
+
+```rust
+let graph = Graph::builder()
+    .simple_fn_node("validate", |mut s: MyState| async move { /* ... */ Ok(NodeOutput::bare(s)) })
+    .simple_fn_node("transform", |mut s: MyState| async move { /* ... */ Ok(NodeOutput::bare(s)) })
+    .dynamic_fn_node("orchestrator", |ctx, state, runner| async move {
+        let state = runner.call("validate", ctx.clone(), state).await?;
+        let state = runner.call("transform", ctx.clone(), state).await?;
+        Ok(NodeOutput::bare(state))
+    })
+    .edge("orchestrator", "__END__")
+    .build();
+```
+
+**Important**: Dynamic node execution is **atomic** — no per-child checkpoints are saved. If the process crashes mid-execution, the entire dynamic node re-runs on recovery.
+
+> See `examples/dynamic_orchestration.rs` for a complete working example.
 
 ---
 
@@ -373,6 +505,10 @@ let graph = Graph::builder()
     .edge("B", "__END__")
     .retry_policy(RetryPolicy { max_attempts: 3, ..Default::default() })
     .budget_eur(10.0)
+    .dynamic_fn_node("orchestrator", |ctx, state, runner| async move {
+        let state = runner.call("A", ctx.clone(), state).await?;
+        Ok(NodeOutput::bare(state))
+    })
     .build();
 ```
 

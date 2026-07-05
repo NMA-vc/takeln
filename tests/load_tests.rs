@@ -80,6 +80,9 @@ async fn test_checkpoint_throughput_10k() {
             "next".to_string(),
             None,
             CheckpointStatus::Complete,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
