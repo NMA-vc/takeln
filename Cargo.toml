@@ -52,7 +52,7 @@ optional = true
 features = ["bundled"]
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 proptest = "1"
 
 [[bench]]
