@@ -52,6 +52,8 @@ pub struct NodeContext {
     pub budget_remaining_eur: Option<f64>,
     /// Cancellation token — check `ctx.cancellation.as_ref().map(|t| t.is_cancelled())`.
     pub cancellation: Option<CancellationToken>,
+    /// Input provided when resuming from a yield (only set on re-entry).
+    pub resumed_input: Option<serde_json::Value>,
 }
 
 impl NodeContext {
@@ -63,6 +65,7 @@ impl NodeContext {
         last_checkpoint_id: Option<String>,
         budget_remaining_eur: Option<f64>,
         cancellation: Option<CancellationToken>,
+        resumed_input: Option<serde_json::Value>,
     ) -> Self {
         // Deterministic UUID v5 from namespace + "{thread_id}:{node_name}:{checkpoint_id}"
         let seed = format!(
@@ -82,6 +85,7 @@ impl NodeContext {
             last_checkpoint_id,
             budget_remaining_eur,
             cancellation,
+            resumed_input,
         }
     }
 }
@@ -92,16 +96,48 @@ mod tests {
 
     #[test]
     fn execution_id_stable_across_attempts() {
-        let ctx1 = NodeContext::new("thread1".into(), "nodeA".into(), 0, Some("cp1".into()), None, None);
-        let ctx2 = NodeContext::new("thread1".into(), "nodeA".into(), 1, Some("cp1".into()), None, None);
+        let ctx1 = NodeContext::new(
+            "thread1".into(),
+            "nodeA".into(),
+            0,
+            Some("cp1".into()),
+            None,
+            None,
+            None,
+        );
+        let ctx2 = NodeContext::new(
+            "thread1".into(),
+            "nodeA".into(),
+            1,
+            Some("cp1".into()),
+            None,
+            None,
+            None,
+        );
         assert_eq!(ctx1.execution_id, ctx2.execution_id);
         assert_ne!(ctx1.attempt_id, ctx2.attempt_id);
     }
 
     #[test]
     fn execution_id_changes_with_checkpoint() {
-        let ctx1 = NodeContext::new("thread1".into(), "nodeA".into(), 0, Some("cp1".into()), None, None);
-        let ctx2 = NodeContext::new("thread1".into(), "nodeA".into(), 0, Some("cp2".into()), None, None);
+        let ctx1 = NodeContext::new(
+            "thread1".into(),
+            "nodeA".into(),
+            0,
+            Some("cp1".into()),
+            None,
+            None,
+            None,
+        );
+        let ctx2 = NodeContext::new(
+            "thread1".into(),
+            "nodeA".into(),
+            0,
+            Some("cp2".into()),
+            None,
+            None,
+            None,
+        );
         assert_ne!(ctx1.execution_id, ctx2.execution_id);
     }
 }

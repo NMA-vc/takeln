@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use takeln::{Graph, GraphError, InMemoryCheckpointer, Node, NodeContext, NodeOutput};
+use takeln::{Graph, GraphError, InMemoryCheckpointer, Node, NodeContext, NodeOutput, YieldRequest};
 
 #[derive(Clone, serde::Serialize, serde::Deserialize, Default, Debug)]
 struct ResumableState {
@@ -27,7 +27,7 @@ struct YieldingNodeB;
 impl Node<ResumableState> for YieldingNodeB {
     async fn call(&self, _ctx: NodeContext, _state: ResumableState) -> Result<NodeOutput<ResumableState>, GraphError> {
         println!("NodeB encountered an interruption (e.g. API down, need manual intervention). Yielding...");
-        Err(GraphError::Yield("Interrupted".to_string()))
+        Err(GraphError::Yield(YieldRequest::simple("Interrupted")))
     }
 }
 

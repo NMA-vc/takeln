@@ -51,10 +51,12 @@ pub mod checkpoint;
 pub mod checkpoint_meta;
 pub mod context;
 pub mod dag;
+pub mod dynamic;
 pub mod emitter;
 pub mod error;
 pub mod graph;
 pub mod history;
+pub mod hitl;
 pub mod merge;
 pub mod metrics;
 pub mod resource_limits;
@@ -64,6 +66,7 @@ pub use checkpoint::Checkpointer;
 pub use checkpoint_meta::{CheckpointMeta, CheckpointStatus, CrashRecoveryPolicy, RetentionPolicy};
 pub use context::NodeContext;
 pub use dag::{DAGBuilder, DAGNode, NodeStatus, DAG};
+pub use dynamic::{ChildRunner, DynamicFnNode, DynamicNode};
 pub use emitter::{NoopEmitter, SpanContext, SpanEmitter, SpanStatus, TracingEmitter};
 pub use error::{GraphError, TakelnError};
 pub use graph::{
@@ -71,6 +74,7 @@ pub use graph::{
     WaveFailurePolicy,
 };
 pub use history::ExecutionRecord;
+pub use hitl::{ResumeContext, ResumeMode, ResumeRecord, YieldRequest};
 pub use merge::Merge;
 pub use metrics::{MetricsHook, NoopMetricsHook};
 pub use resource_limits::ResourceLimits;

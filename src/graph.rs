@@ -2,9 +2,11 @@ use crate::checkpoint::Checkpointer;
 use crate::checkpoint_meta::{CheckpointStatus, CrashRecoveryPolicy};
 use crate::context::NodeContext;
 use crate::dag::{NodeStatus, DAG};
+use crate::dynamic::{ChildRunner, DynamicFnNode, DynamicNode};
 use crate::emitter::{NoopEmitter, SpanContext, SpanEmitter, SpanStatus};
 use crate::error::{GraphError, TakelnError};
 use crate::history::ExecutionRecord;
+use crate::hitl::{ResumeMode, YieldRequest};
 use crate::merge::Merge;
 use crate::metrics::MetricsHook;
 use crate::resource_limits::ResourceLimits;
@@ -236,6 +238,7 @@ pub enum GraphEvent {
 /// The Orchestrator Graph holding the registry of named Nodes.
 pub struct Graph<S: State> {
     nodes: HashMap<String, Arc<dyn Node<S>>>,
+    pub(crate) dynamic_nodes: HashMap<String, Arc<dyn DynamicNode<S>>>,
     edges: HashMap<String, Edge<S>>,
     emitter: Arc<dyn SpanEmitter>,
     retry_policy: RetryPolicy,
@@ -259,6 +262,7 @@ impl<S: State> Graph<S> {
         let (event_tx, _) = tokio::sync::broadcast::channel(128);
         Self {
             nodes: HashMap::new(),
+            dynamic_nodes: HashMap::new(),
             edges: HashMap::new(),
             emitter: Arc::new(NoopEmitter),
             retry_policy: RetryPolicy::default(),
@@ -281,6 +285,7 @@ impl<S: State> Graph<S> {
         let (event_tx, _) = tokio::sync::broadcast::channel(128);
         Self {
             nodes: HashMap::new(),
+            dynamic_nodes: HashMap::new(),
             edges: HashMap::new(),
             emitter,
             retry_policy: RetryPolicy::default(),
@@ -424,6 +429,20 @@ impl<S: State> Graph<S> {
         self.nodes.insert(name.into(), Arc::new(SimpleFnNode { f }));
     }
 
+    /// Register a dynamic node that can invoke child nodes at runtime.
+    pub fn add_dynamic_node(&mut self, name: impl Into<String>, node: impl DynamicNode<S> + 'static) {
+        self.dynamic_nodes.insert(name.into(), Arc::new(node));
+    }
+
+    /// Register a closure-based dynamic node.
+    pub fn add_dynamic_fn_node<F, Fut>(&mut self, name: impl Into<String>, f: F)
+    where
+        F: Fn(NodeContext, S, &ChildRunner<S>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<NodeOutput<S>, GraphError>> + Send,
+    {
+        self.dynamic_nodes.insert(name.into(), Arc::new(DynamicFnNode { f }));
+    }
+
     /// Set resource limits for graph execution.
     pub fn set_resource_limits(&mut self, limits: ResourceLimits) {
         self.resource_limits = limits;
@@ -533,6 +552,22 @@ impl<S: State> GraphBuilder<S> {
         Fut: std::future::Future<Output = Result<NodeOutput<S>, GraphError>> + Send + 'static,
     {
         self.graph.add_simple_fn_node(name, f);
+        self
+    }
+
+    /// Register a dynamic node.
+    pub fn dynamic_node(mut self, name: impl Into<String>, node: impl DynamicNode<S> + 'static) -> Self {
+        self.graph.add_dynamic_node(name, node);
+        self
+    }
+
+    /// Register a closure-based dynamic node.
+    pub fn dynamic_fn_node<F, Fut>(mut self, name: impl Into<String>, f: F) -> Self
+    where
+        F: Fn(NodeContext, S, &ChildRunner<S>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<NodeOutput<S>, GraphError>> + Send,
+    {
+        self.graph.add_dynamic_fn_node(name, f);
         self
     }
 
@@ -653,6 +688,9 @@ impl<S: State + Merge> Graph<S> {
                         next_pending,
                         Some(dag),
                         CheckpointStatus::Interrupted,
+                        None,
+                        None,
+                        None,
                     )
                     .await?;
                 break;
@@ -678,12 +716,21 @@ impl<S: State + Merge> Graph<S> {
 
                 let node_name = dag_node.step_type.clone();
 
-                let node = match self.nodes.get(&node_name) {
-                    Some(n) => n.clone(),
-                    None => {
-                        return Err(TakelnError::NodeNotFound(node_name));
-                    }
+                let is_dynamic = self.dynamic_nodes.contains_key(&node_name);
+                let node = if !is_dynamic {
+                    self.nodes.get(&node_name).cloned()
+                } else {
+                    None
                 };
+                let dyn_node = if is_dynamic {
+                    Some(self.dynamic_nodes.get(&node_name).unwrap().clone())
+                } else {
+                    None
+                };
+
+                if !is_dynamic && node.is_none() {
+                    return Err(TakelnError::NodeNotFound(node_name));
+                }
 
                 // Resolve per-node config
                 let node_config = self.node_configs.get(&node_name);
@@ -701,6 +748,7 @@ impl<S: State + Merge> Graph<S> {
                 let event_seq_clone = self.event_seq.clone();
                 let _metrics_hook_clone = self.metrics_hook.clone();
                 let _execution_records_clone = self.execution_records.clone();
+                let nodes_for_runner = if is_dynamic { self.nodes.clone() } else { HashMap::new() };
 
                 let sem = semaphore.clone();
                 join_set.spawn(async move {
@@ -715,63 +763,83 @@ impl<S: State + Merge> Graph<S> {
 
                     let mut attempt = 0u8;
 
-                    let result = loop {
+                    let result = if let Some(dyn_node) = dyn_node {
+                        // Dynamic node: call directly with ChildRunner
+                        let runner = ChildRunner {
+                            nodes: nodes_for_runner,
+                        };
                         let ctx = NodeContext::new(
                             thread_id_owned.clone(),
                             node_name_owned.clone(),
-                            attempt,
-                            None, // last_checkpoint_id not tracked per-node in parallel waves
-                            None, // budget tracked at graph level, not passed into parallel nodes
+                            0,
+                            None,
+                            None,
                             cancel_clone.clone(),
+                            None,
                         );
-                        let call_fut_inner = node.call(ctx, state_clone.clone());
-                        let res = {
-                            if let Some(timeout_dur) = effective_timeout {
-                                let timed = tokio::time::timeout(timeout_dur, call_fut_inner);
-                                if let Some(token) = &cancel_clone {
+                        dyn_node.call(ctx, state_clone.clone(), &runner).await
+                    } else {
+                        // Regular node: existing retry loop
+                        let node = node.unwrap();
+                        loop {
+                            let ctx = NodeContext::new(
+                                thread_id_owned.clone(),
+                                node_name_owned.clone(),
+                                attempt,
+                                None, // last_checkpoint_id not tracked per-node in parallel waves
+                                None, // budget tracked at graph level, not passed into parallel nodes
+                                cancel_clone.clone(),
+                                None, // resumed_input not supported in DAG parallel waves
+                            );
+                            let call_fut_inner = node.call(ctx, state_clone.clone());
+                            let res = {
+                                if let Some(timeout_dur) = effective_timeout {
+                                    let timed = tokio::time::timeout(timeout_dur, call_fut_inner);
+                                    if let Some(token) = &cancel_clone {
+                                        tokio::select! {
+                                            r = timed => r.unwrap_or_else(|_| Err(GraphError::Fatal(format!("Node '{}' timed out after {:?}", node_name_owned, timeout_dur)))),
+                                            _ = token.cancelled() => Err(GraphError::Yield(YieldRequest::simple("Cancelled"))),
+                                        }
+                                    } else {
+                                        timed.await.unwrap_or_else(|_| Err(GraphError::Fatal(format!("Node '{}' timed out after {:?}", node_name_owned, timeout_dur))))
+                                    }
+                                } else if let Some(token) = &cancel_clone {
                                     tokio::select! {
-                                        r = timed => r.unwrap_or_else(|_| Err(GraphError::Fatal(format!("Node '{}' timed out after {:?}", node_name_owned, timeout_dur)))),
-                                        _ = token.cancelled() => Err(GraphError::Yield("Cancelled".into())),
+                                        r = call_fut_inner => r,
+                                        _ = token.cancelled() => Err(GraphError::Yield(YieldRequest::simple("Cancelled"))),
                                     }
                                 } else {
-                                    timed.await.unwrap_or_else(|_| Err(GraphError::Fatal(format!("Node '{}' timed out after {:?}", node_name_owned, timeout_dur))))
+                                    call_fut_inner.await
                                 }
-                            } else if let Some(token) = &cancel_clone {
-                                tokio::select! {
-                                    r = call_fut_inner => r,
-                                    _ = token.cancelled() => Err(GraphError::Yield("Cancelled".into())),
-                                }
-                            } else {
-                                call_fut_inner.await
-                            }
-                        };
+                            };
 
-                        match res {
-                            Ok(out) => break Ok(out),
-                            Err(GraphError::Retryable(msg)) => {
-                                attempt += 1;
-                                if attempt >= effective_retry.max_attempts {
-                                    break Err(GraphError::Retryable(msg));
+                            match res {
+                                Ok(out) => break Ok(out),
+                                Err(GraphError::Retryable(msg)) => {
+                                    attempt += 1;
+                                    if attempt >= effective_retry.max_attempts {
+                                        break Err(GraphError::Retryable(msg));
+                                    }
+                                    let delay = effective_retry.delay_for(attempt - 1);
+                                    let default_meta = NodeMeta::default();
+                                    emitter_clone
+                                        .emit(&SpanContext {
+                                            thread_id: &thread_id_owned,
+                                            node_name: &node_name_owned,
+                                            checkpoint_id: None,
+                                            attempt,
+                                            duration_ms: 0,
+                                            cost_eur: None,
+                                            status: SpanStatus::Retrying,
+                                            dag_id: None,
+                                            error: Some(&msg),
+                                            meta: &default_meta,
+                                        })
+                                        .await;
+                                    tokio::time::sleep(delay).await;
                                 }
-                                let delay = effective_retry.delay_for(attempt - 1);
-                                let default_meta = NodeMeta::default();
-                                emitter_clone
-                                    .emit(&SpanContext {
-                                        thread_id: &thread_id_owned,
-                                        node_name: &node_name_owned,
-                                        checkpoint_id: None,
-                                        attempt,
-                                        duration_ms: 0,
-                                        cost_eur: None,
-                                        status: SpanStatus::Retrying,
-                                        dag_id: None,
-                                        error: Some(&msg),
-                                        meta: &default_meta,
-                                    })
-                                    .await;
-                                tokio::time::sleep(delay).await;
+                                Err(other) => break Err(other),
                             }
-                            Err(other) => break Err(other),
                         }
                     };
 
@@ -801,6 +869,7 @@ impl<S: State + Merge> Graph<S> {
             let mut has_yielded = false;
             let mut wave_succeeded: Vec<String> = Vec::new();
             let mut wave_failed: Vec<(String, String)> = Vec::new();
+            let mut latest_yield_request = None;
 
             while let Some(res) = join_set.join_next().await {
                 match res {
@@ -839,6 +908,8 @@ impl<S: State + Merge> Graph<S> {
                                     cost_eur: meta.cost_eur,
                                     checkpoint_id: None,
                                     attempts: 0,
+                                    actor: None,
+                                    response_hash: None,
                                 };
                                 let mut records = self.execution_records.lock().await;
                                 while records.len() >= self.resource_limits.max_execution_records {
@@ -865,13 +936,14 @@ impl<S: State + Merge> Graph<S> {
                         wave_succeeded.push(dag.nodes[idx].step_type.clone());
                         wave_states.push((idx, new_state));
                     }
-                    Ok((idx, Err(GraphError::Yield(msg)))) => {
+                    Ok((idx, Err(GraphError::Yield(request)))) => {
                         info!(
                             "Thread {}: Node {} yielded: {}",
-                            thread_id, dag.nodes[idx].step_type, msg
+                            thread_id, dag.nodes[idx].step_type, request.message
                         );
                         dag.nodes[idx].status = NodeStatus::Yielded;
                         has_yielded = true;
+                        latest_yield_request = Some(request.clone());
                     }
                     Ok((idx, Err(e))) => {
                         dag.nodes[idx].status = NodeStatus::Failed;
@@ -925,6 +997,9 @@ impl<S: State + Merge> Graph<S> {
                         next_pending,
                         Some(dag),
                         CheckpointStatus::Yielded,
+                        latest_yield_request,
+                        None,
+                        None,
                     )
                     .await?;
                 return Ok(state);
@@ -965,6 +1040,9 @@ impl<S: State + Merge> Graph<S> {
                     next_pending,
                     Some(dag),
                     CheckpointStatus::Complete,
+                    None,
+                    None,
+                    None,
                 )
                 .await?;
             let _ = cp_id; // DAG-level checkpoint id not tracked further
@@ -1002,18 +1080,53 @@ impl<S: State> Graph<S> {
     pub async fn run(
         &self,
         thread_id: &str,
+        state: S,
+        start_node: &str,
+        checkpointer: &impl Checkpointer<S>,
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<S, TakelnError> {
+        self.run_inner(
+            thread_id,
+            state,
+            start_node,
+            checkpointer,
+            cancellation_token,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Internal execution engine that supports an optional resumed input for HITL re-entry.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_inner(
+        &self,
+        thread_id: &str,
         mut state: S,
         start_node: &str,
         checkpointer: &impl Checkpointer<S>,
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
+        resumed_input: Option<serde_json::Value>,
+        resolved_interrupt: Option<String>,
     ) -> Result<S, TakelnError> {
         let mut current_node_name = start_node.to_string();
         let mut running_cost_eur: f64 = 0.0;
         let mut is_first_step = true;
         let mut last_checkpoint_id: Option<String> = None;
         let mut total_cost: f64 = 0.0;
+        let mut step_count: usize = 0;
+        let mut pending_resumed_input = resumed_input;
 
         loop {
+            // Loop protection: prevent infinite cycles from conditional edges
+            if step_count >= self.resource_limits.max_sequential_steps {
+                return Err(TakelnError::StepLimitExceeded {
+                    steps: step_count,
+                    limit: self.resource_limits.max_sequential_steps,
+                });
+            }
+            step_count += 1;
+
             if current_node_name == "__END__" {
                 debug!("Thread {}: Reached __END__, exiting graph run loop.", thread_id);
                 let total_duration_ms = 0u64; // sequential run doesn't track total duration separately
@@ -1041,18 +1154,25 @@ impl<S: State> Graph<S> {
                         current_node_name.clone(),
                         None,
                         CheckpointStatus::Interrupted,
+                        None,
+                        None,
+                        resolved_interrupt.clone(),
                     )
                     .await?;
                 break;
             }
             is_first_step = false;
 
-            let node = match self.nodes.get(&current_node_name) {
-                Some(n) => n.clone(),
-                None => {
-                    return Err(TakelnError::NodeNotFound(current_node_name));
-                }
+            let is_dynamic = self.dynamic_nodes.contains_key(&current_node_name);
+            let node = if !is_dynamic {
+                self.nodes.get(&current_node_name).cloned()
+            } else {
+                None
             };
+
+            if !is_dynamic && node.is_none() {
+                return Err(TakelnError::NodeNotFound(current_node_name));
+            }
 
             // Resolve per-node config
             let node_config = self.node_configs.get(&current_node_name);
@@ -1073,70 +1193,91 @@ impl<S: State> Graph<S> {
             });
 
             let mut attempt = 0u8;
-            let call_result = loop {
-                let res = {
-                    let ctx = NodeContext::new(
-                        thread_id.to_string(),
-                        current_node_name.clone(),
-                        attempt,
-                        last_checkpoint_id.clone(),
-                        self.budget_eur.map(|b| b - total_cost),
-                        cancellation_token.clone(),
-                    );
-                    let call_fut = node.call(ctx, state.clone());
-                    if let Some(timeout_dur) = effective_timeout {
-                        let timed = tokio::time::timeout(timeout_dur, call_fut);
-                        if let Some(token) = &cancellation_token {
+            let call_result = if is_dynamic {
+                // Dynamic nodes: call directly with ChildRunner, no retry/timeout wrapper
+                let dyn_node = self.dynamic_nodes.get(&current_node_name).unwrap();
+                let runner = ChildRunner {
+                    nodes: self.nodes.clone(),
+                };
+                let ctx = NodeContext::new(
+                    thread_id.to_string(),
+                    current_node_name.clone(),
+                    0,
+                    last_checkpoint_id.clone(),
+                    self.budget_eur.map(|b| b - total_cost),
+                    cancellation_token.clone(),
+                    pending_resumed_input.take(),
+                );
+                dyn_node.call(ctx, state.clone(), &runner).await
+            } else {
+                // Regular nodes: existing retry/timeout loop
+                let node = node.unwrap();
+                loop {
+                    let res = {
+                        let ctx = NodeContext::new(
+                            thread_id.to_string(),
+                            current_node_name.clone(),
+                            attempt,
+                            last_checkpoint_id.clone(),
+                            self.budget_eur.map(|b| b - total_cost),
+                            cancellation_token.clone(),
+                            pending_resumed_input.take(),
+                        );
+                        let call_fut = node.call(ctx, state.clone());
+                        if let Some(timeout_dur) = effective_timeout {
+                            let timed = tokio::time::timeout(timeout_dur, call_fut);
+                            if let Some(token) = &cancellation_token {
+                                tokio::select! {
+                                    r = timed => r.unwrap_or_else(|_| Err(GraphError::Fatal(format!("Node '{}' timed out after {:?}", current_node_name, timeout_dur)))),
+                                    _ = token.cancelled() => Err(GraphError::Yield(YieldRequest::simple("Cancelled"))),
+                                }
+                            } else {
+                                timed.await.unwrap_or_else(|_| {
+                                    Err(GraphError::Fatal(format!(
+                                        "Node '{}' timed out after {:?}",
+                                        current_node_name, timeout_dur
+                                    )))
+                                })
+                            }
+                        } else if let Some(token) = &cancellation_token {
                             tokio::select! {
-                                r = timed => r.unwrap_or_else(|_| Err(GraphError::Fatal(format!("Node '{}' timed out after {:?}", current_node_name, timeout_dur)))),
-                                _ = token.cancelled() => Err(GraphError::Yield("Cancelled".into())),
+                                r = call_fut => r,
+                                _ = token.cancelled() => Err(GraphError::Yield(YieldRequest::simple("Cancelled"))),
                             }
                         } else {
-                            timed.await.unwrap_or_else(|_| {
-                                Err(GraphError::Fatal(format!(
-                                    "Node '{}' timed out after {:?}",
-                                    current_node_name, timeout_dur
-                                )))
-                            })
+                            call_fut.await
                         }
-                    } else if let Some(token) = &cancellation_token {
-                        tokio::select! {
-                            r = call_fut => r,
-                            _ = token.cancelled() => Err(GraphError::Yield("Cancelled".into())),
-                        }
-                    } else {
-                        call_fut.await
-                    }
-                };
+                    };
 
-                match res {
-                    Ok(out) => break Ok(out),
-                    Err(GraphError::Retryable(msg)) => {
-                        attempt += 1;
-                        if attempt >= effective_retry.max_attempts {
-                            break Err(GraphError::Retryable(msg));
+                    match res {
+                        Ok(out) => break Ok(out),
+                        Err(GraphError::Retryable(msg)) => {
+                            attempt += 1;
+                            if attempt >= effective_retry.max_attempts {
+                                break Err(GraphError::Retryable(msg));
+                            }
+                            let delay = effective_retry.delay_for(attempt - 1);
+                            {
+                                let default_meta = NodeMeta::default();
+                                self.emitter
+                                    .emit(&SpanContext {
+                                        thread_id,
+                                        node_name: &current_node_name,
+                                        checkpoint_id: None,
+                                        attempt,
+                                        duration_ms: 0,
+                                        cost_eur: None,
+                                        status: SpanStatus::Retrying,
+                                        dag_id: None,
+                                        error: Some(&msg),
+                                        meta: &default_meta,
+                                    })
+                                    .await;
+                            }
+                            tokio::time::sleep(delay).await;
                         }
-                        let delay = effective_retry.delay_for(attempt - 1);
-                        {
-                            let default_meta = NodeMeta::default();
-                            self.emitter
-                                .emit(&SpanContext {
-                                    thread_id,
-                                    node_name: &current_node_name,
-                                    checkpoint_id: None,
-                                    attempt,
-                                    duration_ms: 0,
-                                    cost_eur: None,
-                                    status: SpanStatus::Retrying,
-                                    dag_id: None,
-                                    error: Some(&msg),
-                                    meta: &default_meta,
-                                })
-                                .await;
-                        }
-                        tokio::time::sleep(delay).await;
+                        Err(other) => break Err(other),
                     }
-                    Err(other) => break Err(other),
                 }
             };
 
@@ -1239,6 +1380,8 @@ impl<S: State> Graph<S> {
                             cost_eur: meta.cost_eur,
                             checkpoint_id: None,
                             attempts: attempt,
+                            actor: None,
+                            response_hash: None,
                         };
                         let mut records = self.execution_records.lock().await;
                         while records.len() >= self.resource_limits.max_execution_records {
@@ -1279,6 +1422,9 @@ impl<S: State> Graph<S> {
                             next_node.clone(),
                             None,
                             CheckpointStatus::Complete,
+                            None,
+                            None,
+                            resolved_interrupt.clone(),
                         )
                         .await?;
                     last_checkpoint_id = Some(checkpoint_id.clone());
@@ -1296,8 +1442,9 @@ impl<S: State> Graph<S> {
 
                     current_node_name = next_node;
                 }
-                Err(GraphError::Yield(msg)) => {
+                Err(GraphError::Yield(request)) => {
                     let duration_ms = (Utc::now() - started_at).num_milliseconds().max(0) as u64;
+                    let msg = request.message.clone();
                     {
                         let default_meta = NodeMeta::default();
                         self.emitter
@@ -1337,6 +1484,9 @@ impl<S: State> Graph<S> {
                             current_node_name.clone(),
                             None,
                             CheckpointStatus::Yielded,
+                            Some(request.clone()),
+                            None,
+                            None,
                         )
                         .await?;
                     break;
@@ -1453,6 +1603,16 @@ impl<S: State> Graph<S> {
                     );
                     return Err(TakelnError::BudgetExceeded { spent_eur, limit_eur });
                 }
+                Err(GraphError::YieldInDynamicNode { interrupt_id }) => {
+                    error!(
+                        "Thread {}: HITL yield inside dynamic node at '{}' (interrupt: '{}'). Move the yielding node to the top level.",
+                        thread_id, current_node_name, interrupt_id
+                    );
+                    return Err(TakelnError::ExecutionError(format!(
+                        "HITL yield inside dynamic node is not supported (node: '{}', interrupt: '{}'). Move the yielding node to a top-level graph node.",
+                        current_node_name, interrupt_id
+                    )));
+                }
             }
         }
 
@@ -1495,7 +1655,15 @@ impl<S: State> Graph<S> {
                                 Edge::Conditional(f) => f(&state),
                             };
                             let final_state = self
-                                .run(thread_id, state, &next, checkpointer, cancellation_token)
+                                .run_inner(
+                                    thread_id,
+                                    state,
+                                    &next,
+                                    checkpointer,
+                                    cancellation_token,
+                                    None,
+                                    meta.claimed_interrupt.clone(),
+                                )
                                 .await?;
                             return Ok(Some(final_state));
                         }
@@ -1503,12 +1671,272 @@ impl<S: State> Graph<S> {
                 }
             }
             let final_state = self
-                .run(thread_id, state, &meta.next_node, checkpointer, cancellation_token)
+                .run_inner(
+                    thread_id,
+                    state,
+                    &meta.next_node,
+                    checkpointer,
+                    cancellation_token,
+                    None,
+                    meta.claimed_interrupt.clone(),
+                )
                 .await?;
             Ok(Some(final_state))
         } else {
             Ok(None)
         }
+    }
+
+    /// Resume execution with structured input for a yielded HITL checkpoint.
+    ///
+    /// Validates the `interrupt_id` matches the pending yield, performs basic schema
+    /// validation on the provided `input`, and resumes according to the yield's
+    /// [`ResumeMode`]:
+    /// - [`ReEntry`](ResumeMode::ReEntry): re-executes the yielded node with the input
+    ///   available via [`NodeContext::resumed_input`].
+    /// - [`Handoff`](ResumeMode::Handoff): skips the yielded node and proceeds to the
+    ///   next node in the graph.
+    ///
+    /// # Idempotent Resume
+    ///
+    /// If the latest checkpoint has already been resolved with the same `interrupt_id`
+    /// (i.e. `resolved_interrupt == Some(interrupt_id)`), the method short-circuits and
+    /// returns `Ok(Some(current_state))` without re-executing anything. This makes it
+    /// safe to retry resume calls across network failures or duplicate webhook deliveries.
+    pub async fn resume_with_input(
+        &self,
+        thread_id: &str,
+        interrupt_id: &str,
+        input: serde_json::Value,
+        context: crate::hitl::ResumeContext,
+        checkpointer: &impl Checkpointer<S>,
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<Option<S>, TakelnError> {
+        // 1. Claim the interrupt atomically
+        let claim = checkpointer.claim_interrupt(thread_id, interrupt_id).await?;
+
+        // 2. Load the state
+        let loaded = checkpointer.load_state(thread_id.to_string()).await?;
+        let (state, meta, _dag) = match loaded {
+            Some(t) => t,
+            None => return Err(TakelnError::NothingToResume(thread_id.to_string())),
+        };
+
+        match claim {
+            crate::checkpoint::ClaimResult::AlreadyCompleted => {
+                info!(
+                    "Thread {}: Idempotent resume for interrupt '{}', returning current state",
+                    thread_id, interrupt_id
+                );
+                return Ok(Some(state));
+            }
+            crate::checkpoint::ClaimResult::InProgress => {
+                return Err(TakelnError::ExecutionError(format!(
+                    "Resume in progress for interrupt '{}' on thread '{}'",
+                    interrupt_id, thread_id
+                )));
+            }
+            crate::checkpoint::ClaimResult::Claimed => {}
+        }
+
+        let yield_request = meta.yield_request.as_ref().ok_or_else(|| {
+            TakelnError::NothingToResume(format!("Thread '{}' has no yield_request metadata", thread_id))
+        })?;
+
+        // Verify interrupt_id matches
+        if yield_request.interrupt_id != interrupt_id {
+            return Err(TakelnError::InvalidResume(format!(
+                "Expected interrupt_id '{}', got '{}'",
+                yield_request.interrupt_id, interrupt_id
+            )));
+        }
+
+        // Basic schema validation if a schema is provided
+        if let Some(schema) = &yield_request.schema {
+            Self::validate_input_against_schema(interrupt_id, &input, schema)?;
+        }
+
+        let response_hash = crate::hitl::compute_response_hash(&input);
+
+        let result =
+            match yield_request.resume_mode {
+                ResumeMode::ReEntry => {
+                    // Re-execute the yielded node with the input
+                    let final_res = self
+                        .run_inner(
+                            thread_id,
+                            state.clone(),
+                            &meta.next_node,
+                            checkpointer,
+                            cancellation_token,
+                            Some(input),
+                            Some(interrupt_id.to_string()),
+                        )
+                        .await;
+                    match final_res {
+                        Ok(final_state) => Some(final_state),
+                        Err(e) => {
+                            // Revert checkpoint to Yielded
+                            if let Err(save_err) = checkpointer
+                                .save_state(
+                                    thread_id.to_string(),
+                                    state,
+                                    meta.next_node.clone(),
+                                    None,
+                                    CheckpointStatus::Yielded,
+                                    Some(yield_request.clone()),
+                                    None,
+                                    None,
+                                )
+                                .await
+                            {
+                                tracing::error!(
+                                "Thread {}: Failed to revert checkpoint status to Yielded after execution failure: {}",
+                                thread_id, save_err
+                            );
+                                return Err(TakelnError::ExecutionError(format!(
+                                    "Execution failed: {}. Rollback save failed: {}",
+                                    e, save_err
+                                )));
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+                ResumeMode::Handoff => {
+                    // Skip the yielded node, resolve its edge, continue from next
+                    let next_node = match self.edges.get(&meta.next_node) {
+                        Some(Edge::Unconditional(target)) => target.clone(),
+                        Some(Edge::Conditional(f)) => f(&state),
+                        None => "__END__".to_string(),
+                    };
+                    let final_res = self
+                        .run_inner(
+                            thread_id,
+                            state.clone(),
+                            &next_node,
+                            checkpointer,
+                            cancellation_token,
+                            None,
+                            Some(interrupt_id.to_string()),
+                        )
+                        .await;
+                    match final_res {
+                        Ok(final_state) => Some(final_state),
+                        Err(e) => {
+                            // Revert checkpoint to Yielded
+                            if let Err(save_err) = checkpointer
+                                .save_state(
+                                    thread_id.to_string(),
+                                    state,
+                                    meta.next_node.clone(),
+                                    None,
+                                    CheckpointStatus::Yielded,
+                                    Some(yield_request.clone()),
+                                    None,
+                                    None,
+                                )
+                                .await
+                            {
+                                tracing::error!(
+                                "Thread {}: Failed to revert checkpoint status to Yielded after execution failure: {}",
+                                thread_id, save_err
+                            );
+                                return Err(TakelnError::ExecutionError(format!(
+                                    "Execution failed: {}. Rollback save failed: {}",
+                                    e, save_err
+                                )));
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+            };
+
+        // Audit Logging (Issue #3)
+        let record = crate::hitl::ResumeRecord {
+            interrupt_id: interrupt_id.to_string(),
+            thread_id: thread_id.to_string(),
+            node_name: meta.next_node.clone(),
+            actor: context.actor.clone(),
+            resumed_at: Utc::now(),
+            response_hash: response_hash.clone(),
+        };
+
+        // Fire metrics hook
+        self.metrics_hook.on_resume(&record);
+
+        // Record in execution_records history
+        {
+            let exec_record = ExecutionRecord {
+                node_name: meta.next_node.clone(),
+                started_at: record.resumed_at,
+                duration_ms: 0,
+                status: "resumed".to_string(),
+                cost_eur: None,
+                checkpoint_id: Some(meta.checkpoint_id.clone()),
+                attempts: 0,
+                actor: context.actor.clone(),
+                response_hash: Some(response_hash),
+            };
+            let mut records = self.execution_records.lock().await;
+            while records.len() >= self.resource_limits.max_execution_records {
+                records.pop_front();
+            }
+            records.push_back(exec_record);
+        }
+
+        Ok(result)
+    }
+
+    /// Basic schema validation: checks JSON type and enum constraints.
+    fn validate_input_against_schema(
+        interrupt_id: &str,
+        input: &serde_json::Value,
+        schema: &serde_json::Value,
+    ) -> Result<(), TakelnError> {
+        // Type check
+        if let Some(expected_type) = schema.get("type").and_then(|t| t.as_str()) {
+            let actual_type = match input {
+                serde_json::Value::Null => "null",
+                serde_json::Value::Bool(_) => "boolean",
+                serde_json::Value::Number(n) => {
+                    if n.is_i64() || n.is_u64() {
+                        "integer"
+                    } else {
+                        "number"
+                    }
+                }
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Array(_) => "array",
+                serde_json::Value::Object(_) => "object",
+            };
+
+            // "number" matches both "number" and "integer"
+            let type_ok = match expected_type {
+                "number" => actual_type == "number" || actual_type == "integer",
+                other => actual_type == other,
+            };
+
+            if !type_ok {
+                return Err(TakelnError::SchemaValidationFailed {
+                    interrupt_id: interrupt_id.to_string(),
+                    reason: format!("Expected type '{}', got '{}'", expected_type, actual_type),
+                });
+            }
+        }
+
+        // Enum constraint
+        if let Some(enum_values) = schema.get("enum").and_then(|e| e.as_array()) {
+            if !enum_values.contains(input) {
+                return Err(TakelnError::SchemaValidationFailed {
+                    interrupt_id: interrupt_id.to_string(),
+                    reason: format!("Value {:?} not in allowed enum values {:?}", input, enum_values),
+                });
+            }
+        }
+
+        Ok(())
     }
 }
 

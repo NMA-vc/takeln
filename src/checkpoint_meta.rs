@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::hitl::YieldRequest;
+
 /// Status of a checkpoint, indicating what the graph was doing when the checkpoint was taken.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +40,16 @@ pub struct CheckpointMeta {
     pub status: CheckpointStatus,
     /// When this checkpoint was created.
     pub created_at: DateTime<Utc>,
+    /// The yield request that caused this checkpoint, if status is `Yielded`.
+    pub yield_request: Option<YieldRequest>,
+    /// The interrupt_id that was claimed for this execution, indicating
+    /// that a resume has been started for this interrupt.
+    pub claimed_interrupt: Option<String>,
+    /// The interrupt_id that was last resolved via `resume_with_input`.
+    /// Used for idempotent resume detection: if a caller retries with the
+    /// same `interrupt_id`, the graph returns the current state instead of
+    /// erroring.
+    pub resolved_interrupt: Option<String>,
 }
 
 /// Policy for retaining or pruning old checkpoints.

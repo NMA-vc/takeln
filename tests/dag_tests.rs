@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use takeln::{
     CheckpointStatus, Checkpointer, DAGNode, Graph, GraphError, GraphEvent, InMemoryCheckpointer, Node, NodeConfig,
-    NodeContext, NodeMeta, NodeOutput, NodeStatus, RetryPolicy, SpanStatus, TakelnError, WaveFailurePolicy, DAG,
+    NodeContext, NodeMeta, NodeOutput, NodeStatus, RetryPolicy, SpanStatus, TakelnError, WaveFailurePolicy,
+    YieldRequest, DAG,
 };
 use uuid::Uuid;
 
@@ -48,6 +49,9 @@ async fn test_in_memory_checkpointer() {
             "next_step".to_string(),
             None,
             CheckpointStatus::Complete,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -145,7 +149,7 @@ struct YieldNode;
 #[async_trait]
 impl Node<TestState> for YieldNode {
     async fn call(&self, _ctx: NodeContext, _state: TestState) -> Result<NodeOutput<TestState>, GraphError> {
-        Err(GraphError::Yield("interrupted".to_string()))
+        Err(GraphError::Yield(YieldRequest::simple("interrupted")))
     }
 }
 
@@ -212,6 +216,9 @@ async fn test_time_travel_checkpointing() {
             "NodeB".to_string(),
             None,
             CheckpointStatus::Complete,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -227,6 +234,9 @@ async fn test_time_travel_checkpointing() {
             "NodeC".to_string(),
             None,
             CheckpointStatus::Complete,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();

@@ -18,4 +18,8 @@ pub struct ExecutionRecord {
     pub checkpoint_id: Option<String>,
     /// Number of retry attempts.
     pub attempts: u8,
+    /// Opaque actor identifier who performed the resume (only for resumes).
+    pub actor: Option<String>,
+    /// SHA-256 hash of the canonicalized resume input (only for resumes).
+    pub response_hash: Option<String>,
 }

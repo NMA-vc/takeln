@@ -40,6 +40,9 @@ fn bench_large_state(c: &mut Criterion) {
                         "next".to_string(),
                         None,
                         CheckpointStatus::Complete,
+                        None,
+                        None,
+                        None,
                     )
                     .await
                     .unwrap();

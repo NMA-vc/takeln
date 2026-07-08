@@ -12,6 +12,7 @@
 /// - 10,000 execution history records
 /// - 10 MB max checkpoint payload
 /// - 10,000 max DAG nodes
+/// - 1,000 max sequential steps (loop protection)
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ResourceLimits {
@@ -23,6 +24,9 @@ pub struct ResourceLimits {
     pub max_checkpoint_bytes: usize,
     /// Maximum DAG nodes allowed (default: 10,000).
     pub max_dag_nodes: usize,
+    /// Maximum sequential steps before aborting (default: 1,000).
+    /// Prevents infinite loops when conditional edges create cycles.
+    pub max_sequential_steps: usize,
 }
 
 impl Default for ResourceLimits {
@@ -32,6 +36,7 @@ impl Default for ResourceLimits {
             max_execution_records: 10_000,
             max_checkpoint_bytes: 10 * 1024 * 1024,
             max_dag_nodes: 10_000,
+            max_sequential_steps: 1_000,
         }
     }
 }
@@ -58,6 +63,13 @@ impl ResourceLimits {
     /// Set the maximum DAG nodes allowed.
     pub fn with_max_dag_nodes(mut self, n: usize) -> Self {
         self.max_dag_nodes = n;
+        self
+    }
+
+    /// Set the maximum sequential steps before aborting.
+    /// Prevents infinite loops when conditional edges create cycles.
+    pub fn with_max_sequential_steps(mut self, n: usize) -> Self {
+        self.max_sequential_steps = n;
         self
     }
 }

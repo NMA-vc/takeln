@@ -4,6 +4,17 @@ use crate::error::TakelnError;
 use crate::graph::State;
 use async_trait::async_trait;
 
+/// Result of claiming a thread resume interrupt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ClaimResult {
+    /// The interrupt has been successfully claimed by this process.
+    Claimed,
+    /// The interrupt claim is currently in progress (active but unresolved).
+    InProgress,
+    /// The interrupt has already been claimed and resolved previously.
+    AlreadyCompleted,
+}
+
 /// Interface for persisting and retrieving execution states across process restarts.
 ///
 /// Implementations save and load the graph state, the next node pointer, and
@@ -24,6 +35,7 @@ pub trait Checkpointer<S: State>: Send + Sync {
     /// `next_node` denotes the node where execution will resume.
     /// `status` indicates what the graph was doing when this checkpoint was taken.
     /// Returns a unique `checkpoint_id` representing this snapshot.
+    #[allow(clippy::too_many_arguments)]
     async fn save_state(
         &self,
         thread_id: String,
@@ -31,6 +43,9 @@ pub trait Checkpointer<S: State>: Send + Sync {
         next_node: String,
         dag: Option<&DAG>,
         status: CheckpointStatus,
+        yield_request: Option<crate::hitl::YieldRequest>,
+        claimed_interrupt: Option<String>,
+        resolved_interrupt: Option<String>,
     ) -> Result<String, TakelnError>;
 
     /// Retrieves the most recent checkpoint for a given `thread_id`.
@@ -54,4 +69,10 @@ pub trait Checkpointer<S: State>: Send + Sync {
     ///
     /// Returns the number of checkpoints deleted.
     async fn delete_checkpoints(&self, thread_id: String, policy: RetentionPolicy) -> Result<usize, TakelnError>;
+
+    /// Atomically check and claim the interrupt for a thread resume operation.
+    ///
+    /// This is a critical compare-and-swap (CAS) operation to ensure single-winner
+    /// semantics for concurrent resume calls.
+    async fn claim_interrupt(&self, thread_id: &str, interrupt_id: &str) -> Result<ClaimResult, TakelnError>;
 }

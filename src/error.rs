@@ -1,3 +1,4 @@
+use crate::hitl::YieldRequest;
 use thiserror::Error;
 
 /// Node-level execution flow signals.
@@ -13,12 +14,19 @@ pub enum GraphError {
     /// An unrecoverable error that should halt execution immediately.
     #[error("Fatal error: {0}")]
     Fatal(String),
-    /// The node is suspending execution (e.g., awaiting human approval).
+    /// The node is suspending execution with a structured yield request.
     #[error("Suspended/Yielded: {0}")]
-    Yield(String),
+    Yield(YieldRequest),
     /// The node's cost would exceed the configured budget.
     #[error("Budget exceeded: spent {spent_eur:.4}€ of {limit_eur:.4}€ limit")]
     BudgetExceeded { spent_eur: f64, limit_eur: f64 },
+    /// A child node inside a dynamic node attempted to yield (HITL).
+    ///
+    /// HITL yields are not supported inside dynamic nodes because dynamic execution
+    /// is atomic — there are no per-child checkpoints. Move the yielding node to the
+    /// top level of the graph instead.
+    #[error("HITL yield inside dynamic node is not supported (interrupt: '{interrupt_id}'). Move the yielding node to a top-level graph node.")]
+    YieldInDynamicNode { interrupt_id: String },
 }
 
 /// Runner-level errors for the graph orchestrator.
@@ -62,4 +70,17 @@ pub enum TakelnError {
         succeeded: Vec<String>,
         failed: Vec<(String, String)>,
     },
+    /// Attempted to resume a thread that has no yielded checkpoint.
+    #[error("Nothing to resume for thread '{0}'")]
+    NothingToResume(String),
+    /// The resume call does not match the pending yield (wrong interrupt_id, etc.).
+    #[error("Invalid resume: {0}")]
+    InvalidResume(String),
+    /// The provided resume input failed schema validation.
+    #[error("Schema validation failed for interrupt '{interrupt_id}': {reason}")]
+    SchemaValidationFailed { interrupt_id: String, reason: String },
+    /// Sequential execution exceeded the maximum allowed step count.
+    /// This typically indicates an infinite loop caused by cyclic edges.
+    #[error("Sequential step limit exceeded: {steps} steps (limit: {limit})")]
+    StepLimitExceeded { steps: usize, limit: usize },
 }

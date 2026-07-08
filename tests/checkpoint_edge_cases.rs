@@ -24,6 +24,9 @@ async fn test_retention_keep_last_3() {
             format!("Node{}", i),
             None,
             CheckpointStatus::Complete,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -62,6 +65,9 @@ async fn test_retention_keep_all() {
             format!("Node{}", i),
             None,
             CheckpointStatus::Complete,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -90,6 +96,9 @@ async fn test_retention_keep_last_more_than_available() {
         "Node0".to_string(),
         None,
         CheckpointStatus::Complete,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -130,6 +139,9 @@ async fn test_checkpoint_status_persists() {
         "NodeA".to_string(),
         None,
         CheckpointStatus::Running,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -148,6 +160,9 @@ async fn test_checkpoint_status_persists() {
         "NodeB".to_string(),
         None,
         CheckpointStatus::Yielded,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -167,6 +182,9 @@ async fn test_checkpoint_meta_in_list() {
         "A".to_string(),
         None,
         CheckpointStatus::Complete,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -177,6 +195,9 @@ async fn test_checkpoint_meta_in_list() {
         "B".to_string(),
         None,
         CheckpointStatus::Interrupted,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -218,6 +239,9 @@ async fn test_crash_recovery_reset_to_pending() {
         "B".to_string(),
         None,
         CheckpointStatus::Running,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -250,6 +274,9 @@ async fn test_crash_recovery_fail_fast() {
         "B".to_string(),
         None,
         CheckpointStatus::Running,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -283,6 +310,9 @@ async fn test_crash_recovery_skip_and_continue() {
         "B".to_string(),
         None,
         CheckpointStatus::Running,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -324,6 +354,9 @@ async fn test_resume_complete_checkpoint_no_crash_recovery() {
         "B".to_string(),
         None,
         CheckpointStatus::Complete,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -385,6 +418,9 @@ async fn test_concurrent_saves_same_thread() {
                 format!("Node{}", i),
                 None,
                 CheckpointStatus::Complete,
+                None,
+                None,
+                None,
             )
             .await
             .unwrap()

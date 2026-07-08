@@ -58,7 +58,10 @@ Each **Node** is an async function `S → Result<NodeOutput<S>, GraphError>` tha
    h. Check interrupt_after → save checkpoint, return
    i. Resolve edge → next node name
    j. If "__END__" → return state
+   k. Increment step counter → check max_sequential_steps limit
 ```
+
+Conditional edges may point back to earlier nodes, creating loops. The `max_sequential_steps` limit (default: 1,000) prevents infinite loops by raising `StepLimitExceeded` when the counter is exhausted.
 
 ---
 
@@ -95,6 +98,14 @@ Parallel node results are merged in **DAG index order** (the order nodes appear 
 
 ---
 
+## Dynamic Node Execution
+
+Dynamic nodes implement the `DynamicNode<S>` trait and receive a `ChildRunner` handle that can invoke registered child nodes imperatively. Unlike edges, which define static transitions between nodes, dynamic nodes decide at runtime which child nodes to call and in what order.
+
+Dynamic node execution is **atomic** — no per-child checkpoints are saved. The entire dynamic node re-runs on crash recovery. Register dynamic nodes via `Graph::add_dynamic_fn_node()` or `GraphBuilder::dynamic_fn_node()`.
+
+---
+
 ## Checkpoint Persistence Model
 
 ```
@@ -107,6 +118,7 @@ Parallel node results are merged in **DAG index order** (the order nodes appear 
 │  status: CheckpointStatus        │
 │  graph_version: Option<String>   │
 │  state_schema_version: Option    │
+│  yield_request: Option<YieldRequest> │
 │  created_at: DateTime<Utc>       │
 └──────────────────────────────────┘
 
@@ -144,19 +156,21 @@ When loading a checkpoint with `Running` status, the `CrashRecoveryPolicy` deter
 GraphError (node-level)          TakelnError (runner-level)
 ├── Retryable(String)            ├── NodeNotFound(String)
 ├── Fatal(String)                ├── CheckpointError(String)
-├── Yield(String)                ├── BudgetExceeded { .. }
+├── Yield(YieldRequest)          ├── BudgetExceeded { .. }
 └── BudgetExceeded { .. }        ├── DAGDeadlock(String)
                                  ├── JoinError(String)
                                  ├── ExecutionError(String)
                                  ├── SerializationError(String)
                                  ├── DeserializationError(String)
                                  ├── RecursionLimitExceeded { .. }
+                                 ├── StepLimitExceeded { .. }
                                  └── PartialWaveFailure { .. }
 ```
 
 - **`GraphError::Retryable`** → triggers retry policy (exponential backoff + jitter)
 - **`GraphError::Fatal`** → immediate abort, no retry
-- **`GraphError::Yield`** → save checkpoint with `Yielded` status, return control to caller
+- **`GraphError::Yield`** → save checkpoint with `Yielded` status, return control to caller. Contains a `YieldRequest` with `interrupt_id`, `message`, optional JSON schema, and `ResumeMode` (ReEntry or Handoff). Resume with `graph.resume_with_input()` which validates the response against the schema.
+- **`TakelnError::StepLimitExceeded`** → sequential loop exceeded `max_sequential_steps`
 - **`TakelnError::PartialWaveFailure`** → only with `WaveFailurePolicy::ContinueOnError`
 
 ---
@@ -219,6 +233,7 @@ NodeContext {
     last_checkpoint_id: Option,  // most recent checkpoint ID
     budget_remaining_eur: Option, // remaining budget (sequential only)
     cancellation: Option,        // cancellation token
+    resumed_input: Option<Value>, // HITL re-entry input (set after resume_with_input)
 }
 ```
 
@@ -234,6 +249,7 @@ ResourceLimits {
     max_execution_records: 10_000,  // in-memory audit trail cap (ring buffer)
     max_checkpoint_bytes: 10 MB,    // max serialized state size (checked before save)
     max_dag_nodes: 10_000,          // max nodes in a DAG (checked at run_dag entry)
+    max_sequential_steps: 1_000,    // max loop iterations in sequential run (prevents infinite loops)
 }
 ```
 
