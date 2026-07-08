@@ -38,7 +38,7 @@ jobs:
       - run: cargo check --all-targets ${{ matrix.features }}
 
   test:
-    name: Test
+    name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
