@@ -35,7 +35,7 @@ tracing = "0.1"
 
 
 [dependencies.sqlx-core]
-version = "0.8"
+version = "0.9"
 optional = true
 default-features = false
 features = ["json", "chrono"]
