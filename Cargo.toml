@@ -47,7 +47,7 @@ default-features = false
 features = ["json", "chrono", "uuid"]
 
 [dependencies.rusqlite]
-version = "0.32"
+version = "0.31"
 optional = true
 features = ["bundled"]
 
