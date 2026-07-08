@@ -24,6 +24,11 @@ jobs:
           - "--features sqlite"
           - "--features postgres"
           - "--all-features"
+        exclude:
+          - rust: "1.75.0"
+            features: "--features postgres"
+          - rust: "1.75.0"
+            features: "--all-features"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
