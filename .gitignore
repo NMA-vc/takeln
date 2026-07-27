@@ -7,3 +7,11 @@
 *.db
 *.sqlite
 .env
+
+# nakiek: per-worktree state, never committed
+.nakiek/state.json
+.nakiek/state.lock
+.nakiek/tmp/
+.nakiek/override.json
+.nakiek/seed/
+.nakiek/scorecard.json
