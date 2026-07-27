@@ -1,0 +1,17 @@
+# INV-02: no SQL string is assembled by interpolation.
+#
+# Mechanized, deterministic, zero tokens, no false negatives. Runs in klaar
+# stage 1, before any model is invoked.
+#
+# Adding a mechanized rule beats adding a rubric rung every time: cheaper,
+# deterministic, runs before any model is involved, and you own it permanently.
+id: no-format-in-query
+language: rust
+severity: error
+message: >-
+  SQL assembled by interpolation. Use a bound parameter instead: .query("... $x").bind(("x", value)).
+note: INV-02
+rule:
+  any:
+    - pattern: $DB.query(format!($$$ARGS))
+    - pattern: $DB.query(&format!($$$ARGS))

@@ -1,0 +1,149 @@
+# gitleaks rules for tectic.
+#
+# The stock ruleset was measured and is not sufficient. It catches
+# `NAME_KEY = "value"` shapes by keyword proximity (4/4 in testing) but knows
+# nothing about this stack's own names, and it deliberately allowlists documented
+# example values such as AKIAIOSFODNN7EXAMPLE.
+#
+# Relying on `generic-api-key` happening to fire on the assignment shape is luck,
+# not coverage. These rules name the secrets that actually exist here.
+#
+# Scanner recall on credentials is 1.0 with no slack, so this file is part of the
+# gate, not a convenience.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "tectic-named-secret"
+description = "A secret named in this stack assigned a literal value"
+# The names measured in tectic, by reference count. CORTECS_API_KEY alone
+# appears over three thousand times.
+#
+# The middle group tolerates a type annotation between the name and the value.
+# Without it, `const CORTECS_API_KEY: &str = "sk-..."` is missed entirely, and
+# that form is how a secret would appear in a Rust source file rather than a
+# config file. A corpus item planted in a .rs file is what surfaced this: the
+# TOML shape `NAME = "value"` was caught, and the Rust shape was not.
+regex = '''(?i)\b(CORTECS_API_KEY|ENCRYPTION_KEY|NEW_ENCRYPTION_KEY|TECTIC_SECRET_MASTER_KEY|AGENT_SIGNING_KEY|GATEWAY_API_KEY|KAIEN_DEPLOY_TOKEN|AGENT_MCP_TOKEN|SSH_APP_KEY|UPCLOUD_S3_ACCESS_KEY|UPCLOUD_S3_SECRET_KEY|R2_ACCESS_KEY|R2_SECRET_ACCESS_KEY|S3_ACCESS_KEY|S3_SECRET_ACCESS_KEY|RESEND_API_KEY|AUTH_RESEND_KEY|ADMIN_SECRET|EMDASH_SECRET|CLIENT_SECRET|SERPER_API_KEY|MOLLIE_API_KEY|BUNDESTAG_API_KEY|GITHUB_TOKEN)\b["']?\s*(?::\s*[&'A-Za-z0-9_<>\[\] ]{0,30})?\s*[:=]\s*["']?([A-Za-z0-9_\-\.\/\+=]{16,})["']?'''
+secretGroup = 2
+keywords = [
+  "cortecs_api_key", "encryption_key", "tectic_secret_master_key",
+  "agent_signing_key", "gateway_api_key", "kaien_deploy_token",
+  "agent_mcp_token", "ssh_app_key", "upcloud_s3_access_key",
+  "upcloud_s3_secret_key", "r2_access_key", "r2_secret_access_key",
+  "s3_access_key", "s3_secret_access_key", "resend_api_key",
+  "auth_resend_key", "admin_secret", "emdash_secret", "client_secret",
+  "serper_api_key", "mollie_api_key", "bundestag_api_key", "github_token",
+]
+
+  [rules.allowlist]
+  description = "Reading a secret is not leaking one"
+  # `let client_secret = self.get_secret("spotify_client_secret")` is the
+  # *correct* pattern and the rule fired on it: a secret-named variable
+  # assigned from anything 16 characters long, including a function call.
+  # Found by auditing tectic's own api_clients.rs, where it aborted the run.
+  # Only a quoted or bare literal is a secret; a call or a path is a lookup.
+  regexTarget = "line"
+  regexes = [
+    # assigned from a call, a method, or a path expression
+    '''[:=]\s*[A-Za-z_][A-Za-z0-9_]*\s*[.(:]''',
+    '''[:=]\s*(?:self|super|crate|std|env|config|cfg|settings|secrets?)\b''',
+    '''env::var|getenv|get_secret|from_env|std::env''',
+    # a struct field or argument being named, not assigned a value
+    '''[:=]\s*&?[A-Za-z_][A-Za-z0-9_]*\s*[,)}]''',
+  ]
+
+[[rules]]
+id = "generic-named-secret"
+description = "Any *_KEY / *_SECRET / *_TOKEN / *_PASSWORD assigned a long literal"
+# The tectic-named-secret rule lists this stack's own names, so outside tectic it
+# never fires - measured: `const API_KEY: &str = "sk-..."` went straight through
+# in takeln and nakiek. This is the name-agnostic version, so the scanner is
+# worth installing in a repo whose secrets are not tectic's.
+regex = '''(?i)\b([A-Z][A-Z0-9_]{2,}_(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIALS?))\b["']?\s*(?::\s*[&'A-Za-z0-9_<>\[\] ]{0,30})?\s*[:=]\s*["']([A-Za-z0-9_\-\.\/\+=]{16,})["']'''
+secretGroup = 2
+keywords = ["_key", "_secret", "_token", "_password", "_passwd", "_credential"]
+
+  [rules.allowlist]
+  description = "Reading a secret is not leaking one"
+  regexTarget = "line"
+  regexes = [
+    '''[:=]\s*[A-Za-z_][A-Za-z0-9_]*\s*[.(:]''',
+    '''[:=]\s*(?:self|super|crate|std|env|config|cfg|settings|secrets?)\b''',
+    '''env::var|getenv|get_secret|from_env|std::env''',
+    '''(?i)\b(changeme|placeholder|example|your[-_]?|xxx+|dummy|sample|test[-_]?(key|token|secret))\b''',
+    # A lowercase-and-hyphen slug is a human-readable placeholder, not a
+    # credential - real keys are high-entropy and mixed-case. Measured: this
+    # rule's only false positive across 60 tectic commits was
+    # `const GATEWAY_KEY: &str = "<lowercase-hyphenated-phrase>"` in an auth
+    # test. Allowlisted by shape rather than by path, because secrets do leak
+    # through test files and excluding tests wholesale would be the bigger hole.
+    '''[:=]\s*["'][a-z][a-z-]{8,}["']''',
+  ]
+
+[[rules]]
+id = "tectic-master-key-hex"
+description = "A bare 64-hex master key, the shape TECTIC_SECRET_MASTER_KEY expects"
+# secrets.rs requires 64 hex chars (32 bytes). A bare value of that shape in a
+# diff is a master key regardless of what it is assigned to - unless it is a
+# content hash. Lockfile checksums and git object ids are the same shape and are
+# not secrets.
+regex = '''\b[0-9a-fA-F]{64}\b'''
+keywords = ["master_key", "master key", "encryption_key", "signing_key"]
+
+  [rules.allowlist]
+  description = "Content hashes, which share the shape but are not keys"
+  # Match the whole line, not the captured secret. By default gitleaks tests an
+  # allowlist regex against the secret alone, so `checksum = "<hex>"` could never
+  # match - the secret is the bare hex.
+  regexTarget = "line"
+  regexes = [
+    '''checksum\s*=\s*"[0-9a-fA-F]{64}"''',
+    '''"integrity":\s*"[^"]+"''',
+    '''(?i)\b(sha256|sha-256|digest|blake3|content_hash|commit)\b[^\n]{0,20}[0-9a-fA-F]{64}''',
+    # Obviously-fake fixtures: 64-hex built from a repeating byte. Real keys do
+    # not look like this and test files are full of them - tectic has
+    # AGENT_SIGNING_KEY = "2a2a2a...". Written without backreferences on
+    # purpose: gitleaks uses Go's RE2, which has none, and an unsupported
+    # pattern makes it panic on startup rather than fail to match.
+    '''(?i)\b(?:00|11|22|33|44|55|66|77|88|99|aa|bb|cc|dd|ee|ff|0a|1a|2a|3a|deadbeef|cafebabe){8,}\b''',
+    '''(?i)\b(?:0{16,}|1{16,}|a{16,}|f{16,})[0-9a-f]*\b''',
+    # A JSON fingerprint field: nakiek's own identity hashes, wherever they
+    # appear. Path allowlists do not help when the file is inside a diff.
+    # nakiek's own identity and content hashes wherever they appear: a
+    # fingerprint, a rubric or invariants hash in baseline.meta.json, a commit.
+    # Path allowlists cannot help when the file is inside a diff piped to stdin.
+    '''"(?:fingerprint|rubric_hash|invariants_hash|commit|checksum)"\s*:\s*"[0-9a-f]{7,64}"''',
+  ]
+
+[allowlist]
+description = "Paths and shapes that are secret-shaped but are not secrets"
+paths = [
+  '''\.example$''',
+  '''\.example\.''',
+  '''(^|/)SECRET_ROTATION\.md$''',
+  '''(^|/)\.nakiek/gitleaks\.toml$''',
+  # nakiek's own artifacts. baseline.jsonl is a list of sha256 fingerprints, and
+  # a fingerprint is the same shape as a 32-byte key - the scanner aborted a
+  # review because the baseline was in the diff. nakiek blocking itself.
+  '''(^|/)\.nakiek/baseline\.jsonl$''',
+  '''(^|/)\.nakiek/baseline\.meta\.json$''',
+  '''(^|/)\.nakiek/scorecard\.json$''',
+]
+# Content that is 64 hex characters but is a content hash, not a key. Measured
+# against the last 40 tectic commits: Cargo.lock checksum lines were the only
+# false positive, and they tripped the master-key rule whenever the same diff
+# mentioned a key name anywhere - gitleaks prefilters by keyword over the whole
+# chunk, not per line. One refused commit in forty is how a hook gets disabled.
+stopwords = []
+# Match the whole line, not the captured secret. A path allowlist cannot help
+# when the file is inside a diff piped over stdin - there is no path context -
+# and a secret-targeted regex cannot see the JSON key next to the hash.
+regexTarget = "line"
+# Placeholder values used in docs and templates. Deliberately narrow: a
+# too-broad allowlist here silently disables the highest-value control in nakiek.
+regexes = [
+  '''(?i)\b(changeme|placeholder|your[-_]?key[-_]?here|xxx+|<[a-z_]+>)\b''',
+  '''\b0{32,}\b''',
+]
