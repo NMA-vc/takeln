@@ -408,6 +408,178 @@ async fn a_failed_resume_is_rolled_back_through_the_bound_save_on_the_current_he
     assert_eq!(meta.status, CheckpointStatus::Yielded);
 }
 
+/// Yields until it is resumed, then appends "g".
+struct Gate;
+
+#[async_trait]
+impl Node<TestState> for Gate {
+    async fn call(&self, ctx: NodeContext, mut state: TestState) -> Result<NodeOutput<TestState>, GraphError> {
+        if ctx.resumed_input.is_none() {
+            return Err(GraphError::Yield(YieldRequest::new("gate", "approve?")));
+        }
+        state.value.push('g');
+        Ok(NodeOutput::bare(state))
+    }
+}
+
+/// Fails, optionally after another writer has moved the thread's head.
+struct FailAfter {
+    store: Arc<HeadStore>,
+    rival_head: Option<&'static str>,
+}
+
+#[async_trait]
+impl Node<TestState> for FailAfter {
+    async fn call(&self, _ctx: NodeContext, _state: TestState) -> Result<NodeOutput<TestState>, GraphError> {
+        if let Some(rival) = self.rival_head {
+            *self.store.head.lock().unwrap() = Some(rival.to_string());
+        }
+        Err(GraphError::Fatal("second step failed".to_string()))
+    }
+}
+
+/// `gate` (yields, then appends) -> `fail` (always fails).
+fn gate_then_fail(store: &Arc<HeadStore>, rival_head: Option<&'static str>) -> Graph<TestState> {
+    let mut graph = Graph::new();
+    graph.add_node("gate", Gate);
+    graph.add_node(
+        "fail",
+        FailAfter {
+            store: store.clone(),
+            rival_head,
+        },
+    );
+    graph.add_edge("gate", "fail");
+    graph.add_edge("fail", "__END__");
+    graph
+}
+
+async fn resume_gate(graph: &Graph<TestState>, store: &HeadStore) -> TakelnError {
+    graph
+        .resume_with_input(
+            "t",
+            "gate",
+            serde_json::json!("yes"),
+            ResumeContext::new("alice"),
+            store,
+            None,
+        )
+        .await
+        .unwrap_err()
+}
+
+#[tokio::test]
+async fn a_rollback_after_the_chain_advanced_compares_against_the_failed_runs_last_write() {
+    let store = Arc::new(HeadStore::new());
+    let graph = gate_then_fail(&store, None);
+    graph
+        .run("t", TestState::default(), "gate", store.as_ref(), None)
+        .await
+        .unwrap();
+    let head_after_yield = store.current_head("t".into()).await.unwrap();
+
+    let err = resume_gate(&graph, &store).await;
+    assert!(err.to_string().contains("second step failed"), "{err}");
+
+    // yield, then the failed run's own write for `gate`, then the rollback.
+    let calls = store.calls();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    let resumed_write = &calls[1];
+    assert_eq!(resumed_write.status, CheckpointStatus::Complete);
+    assert_eq!(resumed_write.proof.expected_head, head_after_yield);
+
+    // The failed run advanced the chain: its last head is the id of its own
+    // write for `gate`, which is not the head the resume started from.
+    let ids: Vec<String> = store
+        .list_checkpoints("t".into())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.checkpoint_id)
+        .collect();
+    assert_eq!(ids.len(), 3, "yield, the failed run's write, the rollback");
+    let failed_run_last_head = Some(ids[1].clone());
+    assert_ne!(failed_run_last_head, head_after_yield);
+
+    let rollback = &calls[2];
+    assert_eq!(rollback.status, CheckpointStatus::Yielded);
+    assert_eq!(rollback.next_node, "gate");
+    assert_eq!(
+        rollback.proof.expected_head, failed_run_last_head,
+        "the rollback extends the failed run's last head"
+    );
+    let (_, meta, _) = store.load_state("t".into()).await.unwrap().unwrap();
+    assert_eq!(meta.status, CheckpointStatus::Yielded);
+}
+
+#[tokio::test]
+async fn a_rollback_conflicts_when_another_writer_moved_the_head_during_the_failed_run() {
+    let store = Arc::new(HeadStore::new());
+    let graph = gate_then_fail(&store, Some("rival-head"));
+    graph
+        .run("t", TestState::default(), "gate", store.as_ref(), None)
+        .await
+        .unwrap();
+
+    // `fail` moves the head to a rival's checkpoint and then fails.
+    let err = resume_gate(&graph, &store).await;
+    let message = err.to_string();
+    assert!(message.contains("second step failed"), "{message}");
+    assert!(message.contains("Rollback save failed"), "{message}");
+    assert!(message.contains("head conflict"), "{message}");
+    assert!(message.contains("rival-head"), "{message}");
+
+    // The rollback was attempted against the failed run's last write, was
+    // refused, and did not fork the chain: the rival's head is untouched.
+    let calls = store.calls();
+    let rollback = calls.last().unwrap();
+    assert_eq!(rollback.status, CheckpointStatus::Yielded);
+    assert_ne!(rollback.proof.expected_head.as_deref(), Some("rival-head"));
+    assert_eq!(
+        store.current_head("t".into()).await.unwrap().as_deref(),
+        Some("rival-head")
+    );
+}
+
+#[tokio::test]
+async fn a_multi_wave_dag_advances_the_head_after_each_wave() {
+    let store = HeadStore::new();
+    let mut graph = Graph::new();
+    graph.add_node("a", Append("a"));
+    graph.add_node("b", Append("b"));
+    let mut dag = DAG::builder().node("a", &[]).node("b", &["a"]).build().unwrap();
+
+    graph
+        .run_dag("t", &mut dag, TestState::default(), &store, None, 0)
+        .await
+        .unwrap();
+
+    let calls = store.calls();
+    assert_eq!(calls.len(), 2, "one durable write per wave: {calls:?}");
+    let ids: Vec<String> = store
+        .list_checkpoints("t".into())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.checkpoint_id)
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(calls[0].proof.expected_head, None, "wave 1 starts at genesis");
+    assert_eq!(
+        calls[1].proof.expected_head.as_deref(),
+        Some(ids[0].as_str()),
+        "wave 2 extends the id wave 1 wrote"
+    );
+    assert_ne!(calls[0].proof.expected_head, calls[1].proof.expected_head);
+    for call in &calls {
+        assert_eq!(call.status, CheckpointStatus::Complete);
+    }
+    assert_eq!(
+        store.current_head("t".into()).await.unwrap().as_deref(),
+        Some(ids[1].as_str())
+    );
+}
+
 #[tokio::test]
 async fn a_successful_resume_writes_the_resolved_interrupt_through_the_bound_save() {
     struct Approve;

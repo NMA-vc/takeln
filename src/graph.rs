@@ -42,16 +42,24 @@ fn checkpoint_id(save: CheckpointSave) -> Result<String, TakelnError> {
 /// Roll a thread back to its `Yielded` checkpoint after a failed resume.
 ///
 /// Goes through [`Checkpointer::save_state_bound`] like every other durable
-/// write, with the head read immediately beforehand: the failed run may
-/// already have advanced the chain, and the rollback must extend it, not fork it.
+/// write. `last_head` is the head the failed run last observed or wrote (see
+/// `run_inner`): the failed run may already have advanced the chain, and the
+/// rollback must extend exactly that head. Re-reading the head here would let
+/// a writer that advanced the chain in between go unnoticed and fork it; with
+/// the run's own last head the store answers `Conflict` instead. Only when the
+/// run never got as far as reading the head (`None`) is the head read here.
 async fn revert_to_yielded<S: State>(
     checkpointer: &impl Checkpointer<S>,
     thread_id: &str,
     state: S,
     next_node: &str,
     yield_request: &YieldRequest,
+    last_head: Option<Option<String>>,
 ) -> Result<(), TakelnError> {
-    let expected_head = checkpointer.current_head(thread_id.to_string()).await?;
+    let expected_head = match last_head {
+        Some(head) => head,
+        None => checkpointer.current_head(thread_id.to_string()).await?,
+    };
     let save = checkpointer
         .save_state_bound(
             thread_id.to_string(),
@@ -1158,11 +1166,18 @@ impl<S: State> Graph<S> {
             cancellation_token,
             None,
             None,
+            &mut None,
         )
         .await
     }
 
     /// Internal execution engine that supports an optional resumed input for HITL re-entry.
+    ///
+    /// `last_head` is an out-parameter for the error path: it is set to
+    /// `Some(head)` once the run has read the thread's head, and updated after
+    /// every durable write that advances it, so a caller that must write after
+    /// a failed run (the rollback in `resume_with_input`) can compare against
+    /// the last head this run wrote, not whatever the store holds by then.
     #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         &self,
@@ -1173,6 +1188,7 @@ impl<S: State> Graph<S> {
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
         resumed_input: Option<serde_json::Value>,
         resolved_interrupt: Option<String>,
+        last_head: &mut Option<Option<String>>,
     ) -> Result<S, TakelnError> {
         let mut current_node_name = start_node.to_string();
         let mut running_cost_eur: f64 = 0.0;
@@ -1182,6 +1198,7 @@ impl<S: State> Graph<S> {
         let mut step_count: usize = 0;
         let mut pending_resumed_input = resumed_input;
         let mut expected_head = checkpointer.current_head(thread_id.to_string()).await?;
+        *last_head = Some(expected_head.clone());
 
         loop {
             // Loop protection: prevent infinite cycles from conditional edges
@@ -1501,6 +1518,7 @@ impl<S: State> Graph<S> {
                             .await?,
                     )?;
                     expected_head = Some(checkpoint_id.clone());
+                    *last_head = Some(expected_head.clone());
                     last_checkpoint_id = Some(checkpoint_id.clone());
                     self.metrics_hook
                         .on_checkpoint_saved(thread_id, &checkpoint_id.to_string());
@@ -1766,6 +1784,7 @@ impl<S: State> Graph<S> {
                                     cancellation_token,
                                     None,
                                     meta.claimed_interrupt.clone(),
+                                    &mut None,
                                 )
                                 .await?;
                             return Ok(Some(final_state));
@@ -1782,6 +1801,7 @@ impl<S: State> Graph<S> {
                     cancellation_token,
                     None,
                     meta.claimed_interrupt.clone(),
+                    &mut None,
                 )
                 .await?;
             Ok(Some(final_state))
@@ -1865,6 +1885,7 @@ impl<S: State> Graph<S> {
             match yield_request.resume_mode {
                 ResumeMode::ReEntry => {
                     // Re-execute the yielded node with the input
+                    let mut last_head = None;
                     let final_res = self
                         .run_inner(
                             thread_id,
@@ -1874,14 +1895,22 @@ impl<S: State> Graph<S> {
                             cancellation_token,
                             Some(input),
                             Some(interrupt_id.to_string()),
+                            &mut last_head,
                         )
                         .await;
                     match final_res {
                         Ok(final_state) => Some(final_state),
                         Err(e) => {
                             // Revert checkpoint to Yielded
-                            if let Err(save_err) =
-                                revert_to_yielded(checkpointer, thread_id, state, &meta.next_node, yield_request).await
+                            if let Err(save_err) = revert_to_yielded(
+                                checkpointer,
+                                thread_id,
+                                state,
+                                &meta.next_node,
+                                yield_request,
+                                last_head,
+                            )
+                            .await
                             {
                                 tracing::error!(
                                 "Thread {}: Failed to revert checkpoint status to Yielded after execution failure: {}",
@@ -1903,6 +1932,7 @@ impl<S: State> Graph<S> {
                         Some(Edge::Conditional(f)) => f(&state),
                         None => "__END__".to_string(),
                     };
+                    let mut last_head = None;
                     let final_res = self
                         .run_inner(
                             thread_id,
@@ -1912,14 +1942,22 @@ impl<S: State> Graph<S> {
                             cancellation_token,
                             None,
                             Some(interrupt_id.to_string()),
+                            &mut last_head,
                         )
                         .await;
                     match final_res {
                         Ok(final_state) => Some(final_state),
                         Err(e) => {
                             // Revert checkpoint to Yielded
-                            if let Err(save_err) =
-                                revert_to_yielded(checkpointer, thread_id, state, &meta.next_node, yield_request).await
+                            if let Err(save_err) = revert_to_yielded(
+                                checkpointer,
+                                thread_id,
+                                state,
+                                &meta.next_node,
+                                yield_request,
+                                last_head,
+                            )
+                            .await
                             {
                                 tracing::error!(
                                 "Thread {}: Failed to revert checkpoint status to Yielded after execution failure: {}",

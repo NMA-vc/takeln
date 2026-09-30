@@ -28,13 +28,13 @@ Agentic workflows require structured execution environments where state can be:
 Add `takeln` to your `Cargo.toml`:
 ```toml
 [dependencies]
-takeln = "0.11.0"
+takeln = "0.12.0"
 ```
 
 With optional features:
 ```toml
 [dependencies]
-takeln = { version = "0.11.0", features = ["sqlite"] }
+takeln = { version = "0.12.0", features = ["sqlite"] }
 ```
 
 ---
