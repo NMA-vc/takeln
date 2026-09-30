@@ -60,9 +60,10 @@ pub mod hitl;
 pub mod merge;
 pub mod metrics;
 pub mod resource_limits;
+pub mod safe_error;
 pub mod store;
 
-pub use checkpoint::Checkpointer;
+pub use checkpoint::{CheckpointProof, CheckpointSave, Checkpointer};
 pub use checkpoint_meta::{CheckpointMeta, CheckpointStatus, CrashRecoveryPolicy, RetentionPolicy};
 pub use context::NodeContext;
 pub use dag::{DAGBuilder, DAGNode, NodeStatus, DAG};
@@ -78,6 +79,7 @@ pub use hitl::{ResumeContext, ResumeMode, ResumeRecord, YieldRequest};
 pub use merge::Merge;
 pub use metrics::{MetricsHook, NoopMetricsHook};
 pub use resource_limits::ResourceLimits;
+pub use safe_error::redacted_error_fingerprint;
 
 pub use store::memory::InMemoryCheckpointer;
 #[cfg(feature = "postgres")]

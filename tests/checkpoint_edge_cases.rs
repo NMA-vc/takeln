@@ -434,3 +434,70 @@ async fn test_concurrent_saves_same_thread() {
     let all = cp.list_checkpoints(tid).await.unwrap();
     assert_eq!(all.len(), 10);
 }
+
+// ── resume_with: rebind BEFORE the resumed nodes run (NMA-1932) ─────────────
+
+/// The node observes the value it is handed — exactly what Plietsch's
+/// dispatcher does with `run_lease_token`. If the rebind only touched the
+/// state `resume` returns, the node would still see the checkpoint's value.
+#[tokio::test]
+async fn test_resume_with_rebinds_state_before_the_next_node_runs() {
+    let cp = InMemoryCheckpointer::<TestState>::new();
+    let tid = "thread_resume_with".to_string();
+
+    cp.save_state(
+        tid.clone(),
+        TestState {
+            value: "stale-token".to_string(),
+        },
+        "B".to_string(),
+        None,
+        CheckpointStatus::Complete,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let mut graph = Graph::new();
+    graph.add_node(
+        "B",
+        AppendNode {
+            suffix: "_seen-by-B".to_string(),
+        },
+    );
+    graph.add_edge("B", "__END__");
+
+    let result = graph
+        .resume_with(&tid, &cp, None, |state| {
+            state.value = "fresh-token".to_string();
+        })
+        .await
+        .unwrap()
+        .expect("a checkpoint exists, so resume_with must run the graph");
+    assert_eq!(
+        result.value, "fresh-token_seen-by-B",
+        "B must have run with the rebound value, not the checkpointed one"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_with_without_a_checkpoint_never_calls_rebind() {
+    let cp = InMemoryCheckpointer::<TestState>::new();
+    let mut graph = Graph::new();
+    graph.add_node(
+        "B",
+        AppendNode {
+            suffix: "_B".to_string(),
+        },
+    );
+    graph.add_edge("B", "__END__");
+    let result = graph
+        .resume_with("thread_never_saved", &cp, None, |_| {
+            panic!("rebind must not run when there is nothing to resume")
+        })
+        .await
+        .unwrap();
+    assert!(result.is_none());
+}

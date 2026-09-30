@@ -22,4 +22,8 @@ pub struct ExecutionRecord {
     pub actor: Option<String>,
     /// SHA-256 hash of the canonicalized resume input (only for resumes).
     pub response_hash: Option<String>,
+    /// Input tokens consumed.
+    pub tokens_in: Option<u32>,
+    /// Output tokens produced.
+    pub tokens_out: Option<u32>,
 }

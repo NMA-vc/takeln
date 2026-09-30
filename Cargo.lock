@@ -940,6 +940,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
+name = "merge"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10bbef93abb1da61525bbc45eeaff6473a41907d19f8f9aa5168d214e10693e9"
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1459,12 +1465,13 @@ dependencies = [
 
 [[package]]
 name = "takeln"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "async-trait",
  "chrono",
  "criterion",
  "hex",
+ "merge",
  "proptest",
  "rand",
  "rusqlite",

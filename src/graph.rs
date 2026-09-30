@@ -1,4 +1,4 @@
-use crate::checkpoint::Checkpointer;
+use crate::checkpoint::{CheckpointProof, CheckpointSave, Checkpointer};
 use crate::checkpoint_meta::{CheckpointStatus, CrashRecoveryPolicy};
 use crate::context::NodeContext;
 use crate::dag::{NodeStatus, DAG};
@@ -17,6 +17,56 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
+
+fn checkpoint_proof<S: State>(_state: &S, expected_head: Option<String>) -> CheckpointProof {
+    CheckpointProof {
+        authorization_hash: None,
+        receipt_chain_count: 0,
+        receipt_chain_head: None,
+        expected_head,
+    }
+}
+
+fn checkpoint_id(save: CheckpointSave) -> Result<String, TakelnError> {
+    match save {
+        CheckpointSave::Created { checkpoint_id }
+        | CheckpointSave::Advanced { checkpoint_id }
+        | CheckpointSave::IdempotentReplay { checkpoint_id } => Ok(checkpoint_id),
+        CheckpointSave::Conflict { actual_head } => Err(TakelnError::ExecutionError(format!(
+            "checkpoint head conflict; actual head: {}",
+            actual_head.as_deref().unwrap_or("<genesis>")
+        ))),
+    }
+}
+
+/// Roll a thread back to its `Yielded` checkpoint after a failed resume.
+///
+/// Goes through [`Checkpointer::save_state_bound`] like every other durable
+/// write, with the head read immediately beforehand: the failed run may
+/// already have advanced the chain, and the rollback must extend it, not fork it.
+async fn revert_to_yielded<S: State>(
+    checkpointer: &impl Checkpointer<S>,
+    thread_id: &str,
+    state: S,
+    next_node: &str,
+    yield_request: &YieldRequest,
+) -> Result<(), TakelnError> {
+    let expected_head = checkpointer.current_head(thread_id.to_string()).await?;
+    let save = checkpointer
+        .save_state_bound(
+            thread_id.to_string(),
+            state.clone(),
+            next_node.to_string(),
+            None,
+            CheckpointStatus::Yielded,
+            Some(yield_request.clone()),
+            None,
+            None,
+            checkpoint_proof(&state, expected_head),
+        )
+        .await?;
+    checkpoint_id(save).map(|_| ())
+}
 
 /// Retry policy attached to the graph or overridden per-node.
 #[derive(Debug, Clone)]
@@ -174,6 +224,13 @@ impl<S: State> NodeOutput<S> {
 pub trait Node<S: State>: Send + Sync {
     /// Execute this node with the given context and state.
     async fn call(&self, ctx: NodeContext, state: S) -> Result<NodeOutput<S>, GraphError>;
+}
+
+#[async_trait]
+impl<S: State, T: Node<S> + ?Sized> Node<S> for Arc<T> {
+    async fn call(&self, ctx: NodeContext, state: S) -> Result<NodeOutput<S>, GraphError> {
+        (**self).call(ctx, state).await
+    }
 }
 
 /// A node implemented as an async closure, avoiding the need for a full struct + trait impl.
@@ -640,6 +697,7 @@ impl<S: State + Merge> Graph<S> {
             .collect();
 
         let mut is_first_wave = true;
+        let mut expected_head = checkpointer.current_head(thread_id.to_string()).await?;
 
         loop {
             // Identify the next ready wave
@@ -681,8 +739,8 @@ impl<S: State + Merge> Graph<S> {
                     .collect::<Vec<_>>()
                     .join(",");
                 self.check_checkpoint_size(&state)?;
-                checkpointer
-                    .save_state(
+                let save = checkpointer
+                    .save_state_bound(
                         thread_id.to_string(),
                         state.clone(),
                         next_pending,
@@ -691,8 +749,10 @@ impl<S: State + Merge> Graph<S> {
                         None,
                         None,
                         None,
+                        checkpoint_proof(&state, expected_head.clone()),
                     )
                     .await?;
+                checkpoint_id(save)?;
                 break;
             }
             is_first_wave = false;
@@ -910,6 +970,8 @@ impl<S: State + Merge> Graph<S> {
                                     attempts: 0,
                                     actor: None,
                                     response_hash: None,
+                                    tokens_in: meta.tokens_in,
+                                    tokens_out: meta.tokens_out,
                                 };
                                 let mut records = self.execution_records.lock().await;
                                 while records.len() >= self.resource_limits.max_execution_records {
@@ -990,8 +1052,8 @@ impl<S: State + Merge> Graph<S> {
                     .collect::<Vec<_>>()
                     .join(",");
                 self.check_checkpoint_size(&state)?;
-                checkpointer
-                    .save_state(
+                let save = checkpointer
+                    .save_state_bound(
                         thread_id.to_string(),
                         state.clone(),
                         next_pending,
@@ -1000,8 +1062,10 @@ impl<S: State + Merge> Graph<S> {
                         latest_yield_request,
                         None,
                         None,
+                        checkpoint_proof(&state, expected_head.clone()),
                     )
                     .await?;
+                checkpoint_id(save)?;
                 return Ok(state);
             }
 
@@ -1033,8 +1097,8 @@ impl<S: State + Merge> Graph<S> {
                 .unwrap_or_else(|| "__END__".to_string());
 
             self.check_checkpoint_size(&state)?;
-            let cp_id = checkpointer
-                .save_state(
+            let save = checkpointer
+                .save_state_bound(
                     thread_id.to_string(),
                     state.clone(),
                     next_pending,
@@ -1043,9 +1107,10 @@ impl<S: State + Merge> Graph<S> {
                     None,
                     None,
                     None,
+                    checkpoint_proof(&state, expected_head.clone()),
                 )
                 .await?;
-            let _ = cp_id; // DAG-level checkpoint id not tracked further
+            expected_head = Some(checkpoint_id(save)?);
 
             // Check declarative interrupt_after for completed wave nodes
             let has_after_interrupt = ready
@@ -1116,6 +1181,7 @@ impl<S: State> Graph<S> {
         let mut total_cost: f64 = 0.0;
         let mut step_count: usize = 0;
         let mut pending_resumed_input = resumed_input;
+        let mut expected_head = checkpointer.current_head(thread_id.to_string()).await?;
 
         loop {
             // Loop protection: prevent infinite cycles from conditional edges
@@ -1147,8 +1213,8 @@ impl<S: State> Graph<S> {
                     thread_id, current_node_name
                 );
                 self.check_checkpoint_size(&state)?;
-                checkpointer
-                    .save_state(
+                let save = checkpointer
+                    .save_state_bound(
                         thread_id.to_string(),
                         state.clone(),
                         current_node_name.clone(),
@@ -1157,8 +1223,10 @@ impl<S: State> Graph<S> {
                         None,
                         None,
                         resolved_interrupt.clone(),
+                        checkpoint_proof(&state, expected_head.clone()),
                     )
                     .await?;
+                checkpoint_id(save)?;
                 break;
             }
             is_first_step = false;
@@ -1382,6 +1450,8 @@ impl<S: State> Graph<S> {
                             attempts: attempt,
                             actor: None,
                             response_hash: None,
+                            tokens_in: meta.tokens_in,
+                            tokens_out: meta.tokens_out,
                         };
                         let mut records = self.execution_records.lock().await;
                         while records.len() >= self.resource_limits.max_execution_records {
@@ -1415,18 +1485,22 @@ impl<S: State> Graph<S> {
 
                     // Save the state and next_node to the checkpointer
                     self.check_checkpoint_size(&state)?;
-                    let checkpoint_id = checkpointer
-                        .save_state(
-                            thread_id.to_string(),
-                            state.clone(),
-                            next_node.clone(),
-                            None,
-                            CheckpointStatus::Complete,
-                            None,
-                            None,
-                            resolved_interrupt.clone(),
-                        )
-                        .await?;
+                    let checkpoint_id = checkpoint_id(
+                        checkpointer
+                            .save_state_bound(
+                                thread_id.to_string(),
+                                state.clone(),
+                                next_node.clone(),
+                                None,
+                                CheckpointStatus::Complete,
+                                None,
+                                None,
+                                resolved_interrupt.clone(),
+                                checkpoint_proof(&state, expected_head.clone()),
+                            )
+                            .await?,
+                    )?;
+                    expected_head = Some(checkpoint_id.clone());
                     last_checkpoint_id = Some(checkpoint_id.clone());
                     self.metrics_hook
                         .on_checkpoint_saved(thread_id, &checkpoint_id.to_string());
@@ -1477,8 +1551,8 @@ impl<S: State> Graph<S> {
                         thread_id, current_node_name, msg
                     );
                     self.check_checkpoint_size(&state)?;
-                    checkpointer
-                        .save_state(
+                    let save = checkpointer
+                        .save_state_bound(
                             thread_id.to_string(),
                             state.clone(),
                             current_node_name.clone(),
@@ -1487,8 +1561,10 @@ impl<S: State> Graph<S> {
                             Some(request.clone()),
                             None,
                             None,
+                            checkpoint_proof(&state, expected_head.clone()),
                         )
                         .await?;
+                    checkpoint_id(save)?;
                     break;
                 }
                 Err(GraphError::Retryable(msg)) => {
@@ -1626,8 +1702,35 @@ impl<S: State> Graph<S> {
         checkpointer: &impl Checkpointer<S>,
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Option<S>, TakelnError> {
+        self.resume_with(thread_id, checkpointer, cancellation_token, |_| {})
+            .await
+    }
+
+    /// [`Graph::resume`], with `rebind` applied to the loaded checkpoint state
+    /// BEFORE any node runs.
+    ///
+    /// A checkpoint carries whatever per-attempt credentials the crashed
+    /// worker held (a run lease token, an authority scope). A retrying worker
+    /// holds fresh ones, and every node from `next_node` onward executes under
+    /// whatever is in the state it is handed — patching the state `resume`
+    /// *returns* is too late, the nodes have already run with the stale
+    /// values. NMA-1932: Plietsch's dispatcher verifies its lease against the
+    /// run ledger and refused every retry as "no longer owned" because the
+    /// resumed state still carried attempt 1's token, so one transient
+    /// first-attempt failure became twenty guaranteed ones.
+    pub async fn resume_with<F>(
+        &self,
+        thread_id: &str,
+        checkpointer: &impl Checkpointer<S>,
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
+        rebind: F,
+    ) -> Result<Option<S>, TakelnError>
+    where
+        F: FnOnce(&mut S),
+    {
         let loaded = checkpointer.load_state(thread_id.to_string()).await?;
-        if let Some((state, meta, _dag)) = loaded {
+        if let Some((mut state, meta, _dag)) = loaded {
+            rebind(&mut state);
             // Apply crash recovery policy if the checkpoint was taken mid-execution
             if meta.status == CheckpointStatus::Running {
                 match &self.crash_recovery_policy {
@@ -1777,18 +1880,8 @@ impl<S: State> Graph<S> {
                         Ok(final_state) => Some(final_state),
                         Err(e) => {
                             // Revert checkpoint to Yielded
-                            if let Err(save_err) = checkpointer
-                                .save_state(
-                                    thread_id.to_string(),
-                                    state,
-                                    meta.next_node.clone(),
-                                    None,
-                                    CheckpointStatus::Yielded,
-                                    Some(yield_request.clone()),
-                                    None,
-                                    None,
-                                )
-                                .await
+                            if let Err(save_err) =
+                                revert_to_yielded(checkpointer, thread_id, state, &meta.next_node, yield_request).await
                             {
                                 tracing::error!(
                                 "Thread {}: Failed to revert checkpoint status to Yielded after execution failure: {}",
@@ -1825,18 +1918,8 @@ impl<S: State> Graph<S> {
                         Ok(final_state) => Some(final_state),
                         Err(e) => {
                             // Revert checkpoint to Yielded
-                            if let Err(save_err) = checkpointer
-                                .save_state(
-                                    thread_id.to_string(),
-                                    state,
-                                    meta.next_node.clone(),
-                                    None,
-                                    CheckpointStatus::Yielded,
-                                    Some(yield_request.clone()),
-                                    None,
-                                    None,
-                                )
-                                .await
+                            if let Err(save_err) =
+                                revert_to_yielded(checkpointer, thread_id, state, &meta.next_node, yield_request).await
                             {
                                 tracing::error!(
                                 "Thread {}: Failed to revert checkpoint status to Yielded after execution failure: {}",
@@ -1878,6 +1961,8 @@ impl<S: State> Graph<S> {
                 attempts: 0,
                 actor: context.actor.clone(),
                 response_hash: Some(response_hash),
+                tokens_in: None,
+                tokens_out: None,
             };
             let mut records = self.execution_records.lock().await;
             while records.len() >= self.resource_limits.max_execution_records {

@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-09-30
+
+Ports the delta that the Tectic fork carried on top of 0.9.1 onto 0.11.0, so the
+fork can be retired. Where the fork and 0.10/0.11 solved the same problem
+differently (yield reason, checkpoint metadata), 0.11's API is unchanged and the
+fork's behaviour is carried onto it.
+
+### Added
+- `CheckpointProof` and `CheckpointSave`: the evidence and optimistic-concurrency precondition for a durable write, and its outcome (`Created`, `Advanced`, `IdempotentReplay`, `Conflict`). Both are re-exported at the crate root.
+- `Checkpointer::current_head` and `Checkpointer::save_state_bound`, both with default implementations. `save_state_bound` takes exactly the arguments of `save_state` (including `yield_request`, `claimed_interrupt` and `resolved_interrupt`) followed by a `CheckpointProof`. The defaults make a store without a head behave as before: `current_head` is `None` and `save_state_bound` forwards to `save_state` and ignores the proof. A store that overrides them can refuse a stale write atomically.
+- The executor writes every durable snapshot (sequential, DAG wave, interrupt, yield, resume and the rollback after a failed resume) through `save_state_bound`, reading the head at the start of a run and carrying the id of each write into the next one. A `Conflict` fails the run with an `ExecutionError` naming the actual head instead of being ignored.
+- `takeln::safe_error` and `redacted_error_fingerprint`: a bounded, deterministic `sha256:<16 hex>(len=<bytes>)` fingerprint of an error string that retains no source characters, for errors that cross a persistence or log boundary. The format is pinned by tests.
+- `Graph::resume_with`: `resume` with a `rebind` closure applied to the loaded state before any node runs (for per-attempt credentials that a retrying worker holds and the crashed one did not).
+- `DAGBuilder::allow_step_types`: constrain the step types `build` accepts; every offender is reported in one error. Unconstrained by default.
+- `ExecutionRecord::tokens_in` and `ExecutionRecord::tokens_out`, filled from `NodeMeta`.
+- `impl Node<S> for Arc<T>` so one node instance can be registered under several names, and `impl Default for NodeContext`.
+- `impl takeln::Merge for T` for every `T: merge::Merge` (the `merge` crate, without its default features, is a new dependency).
+- Tests: `tests/checkpoint_proof_tests.rs`, `tests/yield_reason_persisted.rs` (yield reason read back from the in-memory and SQLite stores, for `run` and for a DAG wave) and `resume_with` cases in `tests/checkpoint_edge_cases.rs`.
+
+### Changed
+- **Breaking**: `ExecutionRecord` has two new public fields (`tokens_in`, `tokens_out`); code that builds one with a struct literal must add them.
+- **Breaking (narrow)**: the blanket `impl<T: merge::Merge> Merge for T` overlaps with a hand-written `impl takeln::Merge for T` on a type that also implements `merge::Merge`. Types that implement only one of the two are unaffected.
+- `TracingEmitter` logs a node error as its `redacted_error_fingerprint` instead of the `Debug` form of the raw error, so provider, tool or user text cannot reach the process log through it.
+- The yield reason is persisted through 0.11's path: `CheckpointMeta::yield_request` (its `message` is the reason) on `Yielded` checkpoints. The fork's `CheckpointStatus::Yielded(Option<String>)` and `CheckpointMeta::reason` are not ported; `CheckpointStatus::Yielded` stays a unit variant.
+
 ## [0.11.0] - 2026-07-05
 
 ### Added

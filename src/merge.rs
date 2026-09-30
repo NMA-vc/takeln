@@ -21,3 +21,9 @@ pub trait Merge {
     /// when parallel wave results are combined.
     fn merge(&mut self, other: Self);
 }
+
+impl<T: merge::Merge> Merge for T {
+    fn merge(&mut self, other: Self) {
+        merge::Merge::merge(self, other);
+    }
+}
