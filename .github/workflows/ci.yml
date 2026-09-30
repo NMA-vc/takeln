@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable, "1.75.0"]
+        rust: [stable, "1.77.0"]
         features:
           - ""
           - "--no-default-features"
@@ -25,9 +25,9 @@ jobs:
           - "--features postgres"
           - "--all-features"
         exclude:
-          - rust: "1.75.0"
+          - rust: "1.77.0"
             features: "--features postgres"
-          - rust: "1.75.0"
+          - rust: "1.77.0"
             features: "--all-features"
     steps:
       - uses: actions/checkout@v4

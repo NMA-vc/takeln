@@ -2,7 +2,7 @@
 name = "takeln"
 version = "0.12.0"
 edition = "2021"
-rust-version = "1.75.0"
+rust-version = "1.77.0"
 authors = ["NMA (New Model Agents) <hello@nma.vc>"]
 license = "Apache-2.0"
 description = "Typed Rust runtime for durable DAG-based agent workflows"
@@ -48,7 +48,7 @@ default-features = false
 features = ["json", "chrono", "uuid"]
 
 [dependencies.rusqlite]
-version = "0.31"
+version = "0.32"
 optional = true
 features = ["bundled"]
 

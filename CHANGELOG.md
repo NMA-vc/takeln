@@ -25,6 +25,7 @@ fork's behaviour is carried onto it.
 - Tests: `tests/checkpoint_proof_tests.rs`, `tests/yield_reason_persisted.rs` (yield reason read back from the in-memory and SQLite stores, for `run` and for a DAG wave) and `resume_with` cases in `tests/checkpoint_edge_cases.rs`.
 
 ### Changed
+- **Breaking**: MSRV raised from 1.75 to 1.77 (rusqlite 0.32, to share libsqlite3-sys with sqlx 0.8).
 - **Breaking**: `ExecutionRecord` has two new public fields (`tokens_in`, `tokens_out`); code that builds one with a struct literal must add them.
 - **Breaking (narrow)**: the blanket `impl<T: merge::Merge> Merge for T` overlaps with a hand-written `impl takeln::Merge for T` on a type that also implements `merge::Merge`. Types that implement only one of the two are unaffected.
 - `TracingEmitter` logs a node error as its `redacted_error_fingerprint` instead of the `Debug` form of the raw error, so provider, tool or user text cannot reach the process log through it.
