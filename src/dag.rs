@@ -100,11 +100,53 @@ impl Default for DAG {
 ///     .build()
 ///     .unwrap();
 /// ```
+///
+/// # Constraining step types
+///
+/// By default any step type is accepted, which is right for an engine that does not
+/// know what its nodes mean. A caller that *does* have a declared set of valid step
+/// types can hand it over with [`DAGBuilder::allow_step_types`], and a node outside
+/// it then fails the build:
+///
+/// ```rust
+/// use takeln::DAG;
+/// let err = DAG::builder()
+///     .allow_step_types(["fetch", "parse"])
+///     .node("fetch", &[])
+///     .node("parce", &["fetch"])   // typo
+///     .build()
+///     .unwrap_err();
+/// assert!(err.contains("parce"));
+/// ```
+///
+/// This exists because an unconstrained step type is a silent failure downstream:
+/// anything that keys per-node state, memory or metrics off the name gets a fresh
+/// bucket for the typo, and every read goes to the correctly spelled one. Nothing
+/// goes red; the data just quietly splits. A build error trades that for one loud
+/// failure, once.
 pub struct DAGBuilder {
     entries: Vec<(String, Vec<String>)>,
+    /// `None` means unconstrained. An empty set means nothing is allowed, which is
+    /// deliberately distinct: a caller that declared no step types wants the build
+    /// to fail, not to be waved through.
+    allowed_step_types: Option<std::collections::BTreeSet<String>>,
 }
 
 impl DAGBuilder {
+    /// Restrict which step types [`DAGBuilder::build`] will accept.
+    ///
+    /// Calling it replaces any previous set. Passing an empty iterator allows
+    /// nothing: "I declared no step types" is a caller error worth surfacing, not a
+    /// licence to accept everything.
+    pub fn allow_step_types<I, S>(mut self, step_types: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_step_types = Some(step_types.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Add a node with the given step type and dependency names.
     pub fn node(mut self, step_type: &str, depends_on: &[&str]) -> Self {
         self.entries.push((
@@ -119,6 +161,31 @@ impl DAGBuilder {
     /// Returns an error if any dependency references a node that doesn't exist,
     /// or if a cycle is detected.
     pub fn build(self) -> Result<DAG, String> {
+        // Before dependency resolution: an unregistered step type is a mistake in
+        // the DAG's vocabulary, and reporting it as a missing dependency (which it
+        // also usually is) sends the reader to the wrong problem. Every offender is
+        // named at once so a multi-typo DAG takes one build to fix, not one each.
+        if let Some(allowed) = &self.allowed_step_types {
+            let offenders: Vec<&str> = self
+                .entries
+                .iter()
+                .map(|(step_type, _)| step_type.as_str())
+                .filter(|step_type| !allowed.contains(*step_type))
+                .collect();
+            if !offenders.is_empty() {
+                let declared = if allowed.is_empty() {
+                    "none declared".to_string()
+                } else {
+                    allowed.iter().cloned().collect::<Vec<_>>().join(", ")
+                };
+                return Err(format!(
+                    "step type(s) not allowed: {} (allowed: {})",
+                    offenders.join(", "),
+                    declared
+                ));
+            }
+        }
+
         let mut dag = DAG::new();
         let mut name_to_id: std::collections::HashMap<String, Uuid> = std::collections::HashMap::new();
 
@@ -184,6 +251,88 @@ impl DAGBuilder {
 impl DAG {
     /// Create a builder for constructing a DAG with string-based dependency references.
     pub fn builder() -> DAGBuilder {
-        DAGBuilder { entries: Vec::new() }
+        DAGBuilder {
+            entries: Vec::new(),
+            allowed_step_types: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod step_type_allowlist_tests {
+    use super::*;
+
+    #[test]
+    fn an_unconstrained_builder_still_accepts_anything() {
+        // The default must not change: takeln is a general engine and most callers
+        // have no declared vocabulary to check against.
+        let dag = DAG::builder()
+            .node("whatever", &[])
+            .node("anything", &["whatever"])
+            .build()
+            .unwrap();
+        assert_eq!(dag.nodes.len(), 2);
+    }
+
+    #[test]
+    fn a_declared_step_type_builds() {
+        let dag = DAG::builder()
+            .allow_step_types(["fetch", "parse"])
+            .node("fetch", &[])
+            .node("parse", &["fetch"])
+            .build()
+            .unwrap();
+        assert_eq!(dag.nodes.len(), 2);
+    }
+
+    #[test]
+    fn an_undeclared_step_type_fails_the_build() {
+        let error = DAG::builder()
+            .allow_step_types(["fetch", "parse"])
+            .node("fetch", &[])
+            .node("score", &["fetch"])
+            .build()
+            .unwrap_err();
+        assert!(error.contains("score"), "{error}");
+        assert!(
+            error.contains("fetch") && error.contains("parse"),
+            "the error must name what IS allowed, or it is not actionable: {error}"
+        );
+    }
+
+    #[test]
+    fn every_offender_is_reported_in_one_build() {
+        let error = DAG::builder()
+            .allow_step_types(["fetch"])
+            .node("fetch", &[])
+            .node("scoer", &["fetch"])
+            .node("rnak", &["fetch"])
+            .build()
+            .unwrap_err();
+        assert!(error.contains("scoer") && error.contains("rnak"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_allowlist_allows_nothing() {
+        let error = DAG::builder()
+            .allow_step_types(Vec::<String>::new())
+            .node("fetch", &[])
+            .build()
+            .unwrap_err();
+        assert!(error.contains("none declared"), "{error}");
+    }
+
+    #[test]
+    fn the_allowlist_is_checked_before_dependency_resolution() {
+        // Both faults are present. The vocabulary error is the one to report: a
+        // misspelled node is usually ALSO a missing dependency, and naming the
+        // dependency sends the reader hunting for a node that was never meant to
+        // exist under that name.
+        let error = DAG::builder()
+            .allow_step_types(["fetch"])
+            .node("scoer", &["nonexistent"])
+            .build()
+            .unwrap_err();
+        assert!(error.contains("not allowed"), "{error}");
     }
 }

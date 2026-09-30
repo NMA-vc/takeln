@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/takeln.svg)](https://crates.io/crates/takeln)
 [![docs.rs](https://img.shields.io/docsrs/takeln)](https://docs.rs/takeln)
 [![License](https://img.shields.io/crates/l/takeln.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.75.0-blue.svg)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html)
+[![MSRV](https://img.shields.io/badge/MSRV-1.77.0-blue.svg)](https://blog.rust-lang.org/2024/03/21/Rust-1.77.0.html)
 
 > Typed Rust runtime for durable DAG-based agent workflows.
 
@@ -28,13 +28,13 @@ Agentic workflows require structured execution environments where state can be:
 Add `takeln` to your `Cargo.toml`:
 ```toml
 [dependencies]
-takeln = "0.11.0"
+takeln = "0.12.0"
 ```
 
 With optional features:
 ```toml
 [dependencies]
-takeln = { version = "0.11.0", features = ["sqlite"] }
+takeln = { version = "0.12.0", features = ["sqlite"] }
 ```
 
 ---

@@ -90,6 +90,22 @@ impl NodeContext {
     }
 }
 
+impl Default for NodeContext {
+    fn default() -> Self {
+        Self {
+            thread_id: "default".to_string(),
+            node_name: "default".to_string(),
+            attempt: 0,
+            execution_id: Uuid::new_v4().to_string(),
+            attempt_id: Uuid::new_v4().to_string(),
+            last_checkpoint_id: None,
+            budget_remaining_eur: None,
+            cancellation: None,
+            resumed_input: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

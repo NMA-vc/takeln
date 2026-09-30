@@ -1,6 +1,8 @@
 use crate::graph::NodeMeta;
 use async_trait::async_trait;
 
+use crate::safe_error::redacted_error_fingerprint;
+
 /// Status of a node execution span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -84,7 +86,7 @@ impl SpanEmitter for TracingEmitter {
                     thread_id = ctx.thread_id,
                     node = ctx.node_name,
                     attempt = ctx.attempt,
-                    error = ?ctx.error,
+                    error = %ctx.error.map(redacted_error_fingerprint).unwrap_or_else(|| "none".to_string()),
                     "Node retrying"
                 );
             }
@@ -94,7 +96,7 @@ impl SpanEmitter for TracingEmitter {
                     node = ctx.node_name,
                     duration_ms = ctx.duration_ms,
                     attempt = ctx.attempt,
-                    error = ?ctx.error,
+                    error = %ctx.error.map(redacted_error_fingerprint).unwrap_or_else(|| "none".to_string()),
                     "Node failed"
                 );
             }
