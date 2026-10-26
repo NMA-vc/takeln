@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `resume_with_input` refuses a DAG checkpoint with a clear error ("resume it with resume_dag") before claiming the interrupt, instead of passing the comma-joined pending list to `run_inner` as one node name (`NodeNotFound`). The refusal leaves the interrupt claimable.
 - Tests: `tests/dag_yield_resume.rs`, both of which fail on 0.12.0.
 
+### Added (proposed 0.13.0)
+- `Graph::set_pre_execution_checkpoint` / `GraphBuilder::pre_execution_checkpoint` (default off): the sequential runner writes a `Running` checkpoint naming the node before each node runs, so a run that dies mid-node resumes through `CrashRecoveryPolicy` (`FailFast`, `ResetToPending`, `SkipAndContinue`) instead of silently re-running the node. One extra durable write per step; a node that returns an error also leaves the thread `Running`. Not applied to `run_dag`. Tests: `tests/pre_execution_checkpoint.rs`.
+
 ### Planned (0.12.x)
 - Raw node error text still reaches `error!`/`warn!` in `graph.rs` and `TakelnError::ExecutionError`; routing it through `safe_error` is planned for 0.12.x.
 

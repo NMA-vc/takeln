@@ -311,6 +311,7 @@ pub struct Graph<S: State> {
     interrupt_before: HashSet<String>,
     interrupt_after: HashSet<String>,
     crash_recovery_policy: CrashRecoveryPolicy,
+    pre_execution_checkpoint: bool,
     event_tx: tokio::sync::broadcast::Sender<GraphEvent>,
     node_configs: HashMap<String, NodeConfig>,
     wave_failure_policy: WaveFailurePolicy,
@@ -335,6 +336,7 @@ impl<S: State> Graph<S> {
             interrupt_before: HashSet::new(),
             interrupt_after: HashSet::new(),
             crash_recovery_policy: CrashRecoveryPolicy::default(),
+            pre_execution_checkpoint: false,
             event_tx,
             node_configs: HashMap::new(),
             wave_failure_policy: WaveFailurePolicy::default(),
@@ -358,6 +360,7 @@ impl<S: State> Graph<S> {
             interrupt_before: HashSet::new(),
             interrupt_after: HashSet::new(),
             crash_recovery_policy: CrashRecoveryPolicy::default(),
+            pre_execution_checkpoint: false,
             event_tx,
             node_configs: HashMap::new(),
             wave_failure_policy: WaveFailurePolicy::default(),
@@ -386,6 +389,16 @@ impl<S: State> Graph<S> {
     /// Set the crash recovery policy for handling checkpoints with `Running` status.
     pub fn set_crash_recovery_policy(&mut self, policy: CrashRecoveryPolicy) {
         self.crash_recovery_policy = policy;
+    }
+
+    /// Write a `Running` checkpoint naming the node before each sequential node runs (default
+    /// off). A run that dies inside a node then resumes from a `Running` checkpoint, so the
+    /// crash recovery policy decides what happens instead of the node silently running again.
+    /// Costs one extra durable write per step. A node that returns an error also leaves the
+    /// thread `Running`, because the engine cannot tell whether its side effect happened.
+    /// Not applied to `run_dag` waves.
+    pub fn set_pre_execution_checkpoint(&mut self, enabled: bool) {
+        self.pre_execution_checkpoint = enabled;
     }
 
     /// Set a global retry policy for all retryable nodes in this graph.
@@ -567,6 +580,12 @@ impl<S: State> GraphBuilder<S> {
     /// Set the crash recovery policy.
     pub fn crash_recovery_policy(mut self, policy: CrashRecoveryPolicy) -> Self {
         self.graph.set_crash_recovery_policy(policy);
+        self
+    }
+
+    /// Checkpoint `Running` before each sequential node; see [`Graph::set_pre_execution_checkpoint`].
+    pub fn pre_execution_checkpoint(mut self, enabled: bool) -> Self {
+        self.graph.set_pre_execution_checkpoint(enabled);
         self
     }
 
@@ -1268,6 +1287,28 @@ impl<S: State> Graph<S> {
             let effective_node_budget = node_config.and_then(|c| c.budget_eur);
 
             info!("Thread {}: Executing node '{}'", thread_id, current_node_name);
+
+            if self.pre_execution_checkpoint {
+                self.check_checkpoint_size(&state)?;
+                let checkpoint_id = checkpoint_id(
+                    checkpointer
+                        .save_state_bound(
+                            thread_id.to_string(),
+                            state.clone(),
+                            current_node_name.clone(),
+                            None,
+                            CheckpointStatus::Running,
+                            None,
+                            None,
+                            resolved_interrupt.clone(),
+                            checkpoint_proof(&state, expected_head.clone()),
+                        )
+                        .await?,
+                )?;
+                expected_head = Some(checkpoint_id.clone());
+                *last_head = Some(expected_head.clone());
+                last_checkpoint_id = Some(checkpoint_id);
+            }
 
             let started_at = Utc::now();
             let _ = self.event_tx.send(GraphEvent::NodeStarted {
