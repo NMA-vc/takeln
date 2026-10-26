@@ -65,9 +65,6 @@ impl CheckpointSave {
 /// `&impl Checkpointer<S>` to the graph executor. Rust's native async fn
 /// in traits (stabilized in 1.75) does not yet support `dyn` dispatch.
 /// This dependency will be removed when that limitation is lifted.
-// `#[async_trait]` adds `#[must_use]` to the boxed futures it generates; newer clippy
-// (`double_must_use`) flags that on every method. Generated code, not ours to change.
-#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Checkpointer<S: State>: Send + Sync {
     /// Return the immutable descriptor at the current head, when the store
