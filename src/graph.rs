@@ -1051,6 +1051,14 @@ impl<S: State + Merge> Graph<S> {
                 });
             }
 
+            // Sort by node index in the DAG to ensure deterministic merge order, and merge
+            // BEFORE a yield is checkpointed: siblings that finished in this wave are already
+            // marked Done, so a yield saved without their output would lose it for good.
+            wave_states.sort_by_key(|(idx, _)| *idx);
+            for (_, wave_state) in wave_states.drain(..) {
+                state.merge(wave_state);
+            }
+
             if has_yielded {
                 let next_pending = dag
                     .nodes
@@ -1075,14 +1083,6 @@ impl<S: State + Merge> Graph<S> {
                     .await?;
                 checkpoint_id(save)?;
                 return Ok(state);
-            }
-
-            // Sort by node index in the DAG to ensure deterministic merge order
-            wave_states.sort_by_key(|(idx, _)| *idx);
-
-            // Merge wave results into running state
-            for (_, wave_state) in wave_states {
-                state.merge(wave_state);
             }
 
             // Budget enforcement
@@ -1835,6 +1835,15 @@ impl<S: State> Graph<S> {
         checkpointer: &impl Checkpointer<S>,
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Option<S>, TakelnError> {
+        // A DAG checkpoint's `next_node` lists every pending node, comma-joined, which is no
+        // single node to run: such a checkpoint resumes through `resume_dag`. Refused before
+        // the claim, so a refused call leaves the interrupt claimable.
+        if let Some((_, _, Some(_))) = checkpointer.load_state(thread_id.to_string()).await? {
+            return Err(TakelnError::ExecutionError(format!(
+                "thread '{thread_id}' holds a DAG checkpoint; resume it with resume_dag"
+            )));
+        }
+
         // 1. Claim the interrupt atomically
         let claim = checkpointer.claim_interrupt(thread_id, interrupt_id).await?;
 
@@ -2100,6 +2109,15 @@ impl<S: State + Merge> Graph<S> {
             }
 
             dag.restore_statuses(&saved_dag);
+
+            // A node that yielded never completed: re-enter it. `ready` admits only Pending
+            // nodes, so leaving it Yielded deadlocked the DAG (or ended it silently when the
+            // yielded node had no dependents).
+            for node in &mut dag.nodes {
+                if node.status == crate::dag::NodeStatus::Yielded {
+                    node.status = crate::dag::NodeStatus::Pending;
+                }
+            }
 
             // Apply crash recovery to any Running nodes in the restored DAG
             if meta.status == CheckpointStatus::Running {
