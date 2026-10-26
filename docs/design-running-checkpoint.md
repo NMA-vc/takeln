@@ -1,6 +1,6 @@
-# Design note: a `Running` checkpoint before each node (not implemented)
+# Design note: a `Running` checkpoint before each node
 
-Status: proposal, 2026-10-26. Source: Tectic code audit 2026-10-26, finding 7.
+Status: implemented as an opt-in (`set_pre_execution_checkpoint`, default off) for the sequential runner, proposed for 0.13.0; `run_dag` waves are not covered. 2026-10-26. Source: Tectic code audit 2026-10-26, finding 7.
 
 ## The problem
 
