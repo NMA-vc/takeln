@@ -46,6 +46,9 @@
 //!     assert_eq!(state.value, "Hello World");
 //! }
 //! ```
+// `#[async_trait]` adds `#[must_use]` to the boxed futures it generates for every trait method;
+// newer stable clippy (`double_must_use`) flags that generated code on each one.
+#![allow(clippy::double_must_use)]
 
 pub mod checkpoint;
 pub mod checkpoint_meta;

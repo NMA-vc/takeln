@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (proposed 0.12.1)
+- A DAG wave in which one node yields no longer loses the output of the siblings that finished in that wave: the wave's states are merged before the yield is checkpointed (they were already marked `Done`, so their output was gone for good).
+- `resume_dag` re-enters a node that yielded (`Yielded` -> `Pending`). `ready` admits only `Pending` nodes, so the yielded node was never run again: the DAG deadlocked, or ended silently when the node had no dependents.
+- `resume_with_input` refuses a DAG checkpoint with a clear error ("resume it with resume_dag") before claiming the interrupt, instead of passing the comma-joined pending list to `run_inner` as one node name (`NodeNotFound`). The refusal leaves the interrupt claimable.
+- Tests: `tests/dag_yield_resume.rs`, both of which fail on 0.12.0.
+
 ### Planned (0.12.x)
 - Raw node error text still reaches `error!`/`warn!` in `graph.rs` and `TakelnError::ExecutionError`; routing it through `safe_error` is planned for 0.12.x.
 
